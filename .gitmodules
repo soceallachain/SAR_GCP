@@ -1,0 +1,9 @@
+[submodule "s1isp"]
+	path = s1isp
+	url = https://github.com/avalentino/s1isp.git
+[submodule "bpack"]
+	path = bpack
+	url = https://github.com/avalentino/bpack.git
+[submodule "sentinel1decoder"]
+	path = sentinel1decoder
+	url = https://github.com/Rich-Hall/sentinel1decoder.git

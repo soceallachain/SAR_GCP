@@ -1,0 +1,10 @@
+numpy
+pandas
+scipy
+matplotlib
+rasterio
+pillow
+xarray
+google-cloud-storage
+-e git+https://github.com/avalentino/s1isp@e9ba19d017f7c787a30dc2c860cee2142dd4f369#egg=s1isp
+sentinel1decoder @ git+https://github.com/Rich-Hall/sentinel1decoder@fdf2e88f4b2ff6ac2d93b35271cb7cffdad1fa14
