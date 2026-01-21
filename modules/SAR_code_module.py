@@ -184,8 +184,8 @@ def get_single_raw_burst_from_files(raw_file, slc_annotation_file, burst_to_get,
              ('iw3' in annotation_file and IW_mode==2))):
         print(f'ERROR: IW mode of SLC annotation file does not match expected swath'
               f' or there is a polarization mis-match !')
-        print('Exiting ....')
-        sys.exit(0)
+        print('Exiting function....')
+        raise ValueError("ERROR: IW mode or polarization mismatch with SLC file")
     
     # Have SLC annotation file and raw filename
     slc_iw_burst_data = []
@@ -220,9 +220,10 @@ def get_single_raw_burst_from_files(raw_file, slc_annotation_file, burst_to_get,
 
 # Assumes a raw burst matching its SLC equivalent is sought
 # For this need SLC annotation information to ensure correct temporal overlap
-def get_slc_matched_raw_burst_from_file(raw_filename, slc_annotation_file, burst_to_get, 
-                            swath_of_interest, polarization
-                            ):
+def get_slc_matched_raw_burst_from_file(raw_filename, slc_annotation_file, 
+                                        burst_to_get, swath_of_interest, 
+                                        polarization
+                                        ):
 
 ##
 # Function to return a raw burst based on the SLC burst number
@@ -237,7 +238,7 @@ def get_slc_matched_raw_burst_from_file(raw_filename, slc_annotation_file, burst
     
     if not (os.path.exists(raw_filename)):
         print(f' Path to {raw_filename} inaccessible: Exiting!')
-        sys.exit()
+        raise ValueError(f"Error: Path to {raw_filename} inaccessible: Exiting!")
     else:
         print(f' Path to {raw_filename} found')
         raw_iw_data       = get_raw_burst_info(raw_filename)
@@ -246,7 +247,7 @@ def get_slc_matched_raw_burst_from_file(raw_filename, slc_annotation_file, burst
         print(f'{annotation_file} found')
     else:
         print(f'ERROR: {annotation_file} - Exiting!  ')
-        sys.exit(0)
+        raise ValueError(f"Error: Path to {annotation_file} inaccessible: Exiting!")
 
     
     #Check RAW and SLC annotation 
@@ -257,9 +258,8 @@ def get_slc_matched_raw_burst_from_file(raw_filename, slc_annotation_file, burst
         print(f'ERROR: IW mode of SLC annotation file does not match expected swath'
               f' or there is a polarization mis-match !')
         print('Exiting ....')
-        sys.exit(0)
-    
-
+        raise ValueError(f"Error: IW mode or polarization mismatch with SLC")    
+        return -1
     # Have SLC src and annotation file and raw filename
     
     ###########################################################################
@@ -298,6 +298,8 @@ def get_slc_matched_raw_burst_from_file(raw_filename, slc_annotation_file, burst
         raw_burst_mid_time   = raw_burst_timings['Mid Burst Time']
         raw_burst_start_time = raw_burst_timings['Burst Start Time']
         raw_burst_end_time   = raw_burst_timings['Burst End Time']
+        
+        # Check that burst_pre_time not greater than half of raw_burst time
         new_burst_start_time = raw_burst_mid_time - timedelta(seconds=burst_pre_time)
         new_burst_end_time   = raw_burst_mid_time + timedelta(seconds=burst_post_time)
         
@@ -3133,8 +3135,8 @@ def getSwathBurstGridGPSBoundaries(annotation_file):
     
         azimuth_burst_end_time = datetime.strptime(azimuth_time,
                                                    '%Y-%m-%dT%H:%M:%S.%f') \
-                                  + timedelta(seconds
-                                  = (nBurstLines * azTimeInterval))
+                               + timedelta(seconds=(nBurstLines*azTimeInterval)
+                                           )
     
         burstGridPoints.append({
             'azimuth_time': azimuth_time,
@@ -3155,14 +3157,14 @@ def getSwathBurstGridGPSBoundaries(annotation_file):
     burst_start_times = df[df['pixel'] == pixel_value]['azimuth_time']
     
     
-    
+    """
     #Add code to get valid lines and pixels
     valid_burst_corners             = get_valid_corners_of_bursts(annotation_file)
     number_valid_burst_lines        = get_number_valid_lines_in_slc_burst(valid_burst_corners)
     number_valid_burst_range_pixels = get_number_valid_range_pixels_in_slc_burst(valid_burst_corners)
     invalid_burst_start_lines       = get_number_invalid_start_lines_in_slc_burst(valid_burst_corners)
     invalid_burst_start_pixels      = get_number_invalid_start_range_pixels_in_slc_burst(valid_burst_corners)
-    
+    """
     
     valid_burst_start_times=[]
     for i in range(0, nBursts):
@@ -3229,15 +3231,25 @@ def getSwathBurstGridGPSBoundaries(annotation_file):
                                      == str(i+2)]['line'].to_numpy().astype(int)[0] 
         
         # First burst : take all valid samples as no overlap with previous burst
+        #Amended 17-Dec-2025: Why? To account for situation where due to
+        #                          execessive overlap between SLC bursts the 
+        #                          overlap, in either pre or post execceds the 
+        #                          number of pre or post azimuth lines in the 
+        #                          raw burst. So now removed overlap from 
+        #                          first and last burst as well, since this is 
+        #                          where issue manifests itself.
+        # ..... probably easier to remove the if..elsif...else statement ....
+        # ... but let's leave it in place in case something else goes wrong!
         if i==0:
-            merged_start_line = valid_burst_start_line #+ round(overlap_offset_lines[i])
+            merged_start_line = (valid_burst_start_line 
+                                + round(overlap_offset_lines[i]))
             merged_end_line   = (valid_burst_end_line
                                 - round(overlap_offset_lines[i]))
 
         # Last burst different as no overlap with next burst so use all valid samples
         elif i==nBursts-1:
             merged_start_line = valid_burst_start_line + round(overlap_offset_lines[i-1])
-            merged_end_line   = valid_burst_end_line
+            merged_end_line   = valid_burst_end_line   - round(overlap_offset_lines[i-1])
 
         # Otherwise for all other bursts set boundary as mid-point of overlap
         else:
@@ -5571,14 +5583,16 @@ def find_raw_safe_dir(slc_safe_dir, raw_dir):
    
    #find raw safe files that start less than 4s earlier than slc
    #making assumption that only 1 raw file can exist within 5s of start of slc
+   # Ensure only parsing '.SAFE' files 
    for f in os.listdir(raw_dir):
-       match_found = False
-       date_time = f.split('_')[5]
-       raw_date_time = datetime.strptime(date_time, time_format)
-       #Ensure SLC and RAW files within 5 seconds of each other
-       if (np.abs((slc_date_time - raw_date_time).total_seconds()) < 5):
-           match_found = True
-           break
+       if 'SAFE' in f:
+           match_found = False
+           date_time = f.split('_')[5]
+           raw_date_time = datetime.strptime(date_time, time_format)
+           #Ensure SLC and RAW files within 5 seconds of each other
+           if (np.abs((slc_date_time - raw_date_time).total_seconds()) < 5):
+               match_found = True
+               break
    if match_found == False:
        print(f'Error: No raw SAFE dir found matching SLC start time for {slc_safe_dir}')
        sys.exit(0)
@@ -5607,18 +5621,18 @@ def get_raw_filename_matching_slc_filename(slc_safe_dir, raw_dir, pol):
     return raw_filename
    
     
-def get_raw_slc_annotation_filenames(raw_dir, slc_SAFE_dir, location, pol):
+def get_raw_slc_annotation_filenames(raw_dir, slc_safe_dir, location, pol):
         
     # Get slc image and annotation file names and directories
     # Use getSLCFilesFromSafeDir function even though don't yet know which swath
-    # is of interest
-    slc_file_info   = getSLCFilesFromSafeDir(slc_SAFE_dir,2)
+    # is of interest. Using '2' as a dummy placeholder.
+    slc_file_info   = getSLCFilesFromSafeDir(slc_safe_dir,2,pol)
     annotation_path = slc_file_info[2]
     slc_path        = annotation_path.replace('annotation','measurement')
     slc_filenames   = slc_file_info[3]
 
     #raw_safe_dir = f'{raw_dir}'
-    raw_file = get_raw_filename_matching_slc_filename(slc_SAFE_dir, raw_dir, pol)
+    raw_file = get_raw_filename_matching_slc_filename(slc_safe_dir, raw_dir, pol)
     
     # Get gps boundaries of all swaths
     
@@ -5631,12 +5645,18 @@ def get_raw_slc_annotation_filenames(raw_dir, slc_SAFE_dir, location, pol):
     slc_src_file    = slc_path + slc_filenames[swath_index]
     annotation_file = annotation_path+change_extension(slc_filenames[swath_index],
                                                         "xml"
-                                                        )
+                                                       )
+    # 8th Jan 2026: For completeness ... find burst as well..
+    burst_info = getSwathBurstGridGPSBoundaries(annotation_file)
+    burst_gps_boundaries = burst_info[2]
+    burst_index = getGrid(location, burst_gps_boundaries)
   
-    return raw_file, slc_src_file, annotation_file, swath_index
+    return raw_file, slc_src_file, annotation_file, swath_index, burst_index
     
-
-def plot_raw_slc_data(fnames_and_swath, location, pol):
+# Function mainly used to plot GPS posiitons of ships in raw and slc files
+# Amended 14-12-2025 to input ship information -name, speed, bearing, orbital 
+# node 
+def plot_raw_slc_data(fnames_and_swath, location, pol, info=[], save_fig=0, save_path =''):
     
     raw_file        = fnames_and_swath[0]
     slc_src_file    = fnames_and_swath[1]
@@ -5644,16 +5664,29 @@ def plot_raw_slc_data(fnames_and_swath, location, pol):
     swath_index     = fnames_and_swath[3]
     
     # Find burst in swath containing location 
-    burst_info                = getSwathBurstGridGPSBoundaries(annotation_file)
-    burst_boundaries          = burst_info[1]
-    burst_gps_boundaries      = burst_info[2]
-    burst_index               = getGrid(location, burst_gps_boundaries)
+    burst_info           = getSwathBurstGridGPSBoundaries(annotation_file)
+    burst_boundaries     = burst_info[1]
+    burst_gps_boundaries = burst_info[2]
+    burst_index          = getGrid(location, burst_gps_boundaries)
+    
+    if burst_index == -1:
+        raise ValueError(f'*** Error: Location {location} not found in '
+                         f'{slc_src_file} with boundaries '
+                         f'{burst_info[0]} ... Exiting ****')
+        
     
     burst_grid_boundaries     = burst_info[3] 
     burst_grid_gps_boundaries = burst_info[4]
     grid_index                = getGrid(location, 
                                         burst_grid_gps_boundaries[burst_index]
                                         ) 
+    if grid_index == -1:
+        raise ValueError(f'*** Error: Location {location} not found in '
+                         f' {slc_src_file} burst#{burst_index+1} with '
+                         f'burst boundaries '
+                         f'{burst_gps_boundaries[burst_index]}'
+                         f' ... Exiting ****'
+                         )
     
     # find [row, col] location in swath for gps location using burst gps boundaries
     interp_row, interp_col = getShipInterpolatedPositionInBurst(
@@ -5661,8 +5694,8 @@ def plot_raw_slc_data(fnames_and_swath, location, pol):
                               burst_gps_boundaries[burst_index],
                               burst_boundaries[burst_index]
                               )
-    burst_based_row      = round(interp_row)
-    burst_based_col      = round(interp_col)
+    burst_based_row = round(interp_row)
+    burst_based_col = round(interp_col)
     
     
     # find [row, col] location in swath for gps location using grid gps boundaries
@@ -5671,19 +5704,23 @@ def plot_raw_slc_data(fnames_and_swath, location, pol):
                               burst_grid_gps_boundaries[burst_index][grid_index],
                               burst_grid_boundaries[burst_index][grid_index]
                               )
-    grid_based_row      = round(interp_row)
-    grid_based_col      = round(interp_col)
+    grid_based_row = round(interp_row)
+    grid_based_col = round(interp_col)
     
     # Convert swath based [row,col] to burst co-ordinates by subtracting starting 
     # row and starting column
     burst_start_row = burst_boundaries[burst_index][0][0]
     burst_start_col = burst_boundaries[burst_index][0][1]
-    location1=[burst_based_row - burst_start_row, burst_based_col - burst_start_col]
-    location2=[grid_based_row  - burst_start_row, grid_based_col  - burst_start_col]
+    location1       = [burst_based_row - burst_start_row,
+                       burst_based_col - burst_start_col
+                       ]
+    location2       = [grid_based_row  - burst_start_row,
+                       grid_based_col  - burst_start_col
+                       ]
     # Correct for range sampling frequency difference between RAW and SLC
-    sampling_freq_mul=freq_multipliers[swath_index]
-    location1=[int(location1[0]), int(location1[1]*sampling_freq_mul)]
-    location2=[int(location2[0]), int(location2[1]*sampling_freq_mul)]
+    sampling_freq_mul= freq_multipliers[swath_index]
+    location1        = [int(location1[0]), int(location1[1]*sampling_freq_mul)]
+    location2        = [int(location2[0]), int(location2[1]*sampling_freq_mul)]
     
     
     # Are they the same??
@@ -5702,7 +5739,8 @@ def plot_raw_slc_data(fnames_and_swath, location, pol):
     
     # plot raw and slc burst
     
-    raw_burst_data = get_slc_matched_raw_burst_from_file(raw_file,annotation_file,
+    raw_burst_data = get_slc_matched_raw_burst_from_file(raw_file,
+                                annotation_file,
                                 burst_number, swath_index +1, pol
                                 )
     slc_matched_raw_burst = raw_burst_data[0]
@@ -5719,19 +5757,10 @@ def plot_raw_slc_data(fnames_and_swath, location, pol):
     
 
 
-    img_name =(f"{slc_src_file.split('/')[11].split('.')[0]}"
+    img_name =(f"{slc_src_file.split('/')[14].split('.')[0]}"
                f"_IW{swath_index+1}_Burst#{burst_index +1}")
-    plot_2d_array(np.square(np.abs(slc_burst)),f'{img_name} SLC')
-    
-    plot_2d_array(np.real(slc_matched_raw_burst),f'{img_name} RAW','linear')
-    
-    """
-    RMA_focused_raw_burst = focus_SM_burst(meta_data, slc_matched_raw_burst, roi,
-                                           p_l0file, 'rma' 
-                                           )
-    img_name = f'SM_focus'
-    f=plot_2d_array(np.square(np.abs(RMA_focused_raw_burst)),img_name)
-    """
+  
+
     #### Try range compression
     range_padding = 1000
     az_padding    = 200
@@ -5748,15 +5777,34 @@ def plot_raw_slc_data(fnames_and_swath, location, pol):
                         ]
     del rc_padded_burst
     rc_padded_burst = resized_rc_padded_burst
-    plot_2d_array(intensity(rc_padded_burst),'rc_padded_burst')
+    #plot_2d_array(intensity(rc_padded_burst),'rc_padded_burst')
+   
+    #SLC_ID = slc_src_file.split('/')[11].split('.')[0]
+    safe_dir    = slc_src_file.split('/')[14]
+    clean_name  = safe_dir.replace('.SAFE', '')
+    # 3. Split by underscore and slice the last two items
+    # [-2:] means "take the last two items"
+    parts       = clean_name.split('_')
+    SLC_ID      = "_".join(parts[-2:])
+    date_T_time = parts[5]
+    satellite   = parts[0]
     
-    ### Try another file from a different date
+    #Plot RAW and SLC zoomed in around location
+    slc_img_name = f'{satellite}_{SLC_ID}_{date_T_time}_SLC'
+    raw_img_name = f'{satellite}_{SLC_ID}_{date_T_time}_RAW'
+    #slc_fig      = plot_2d_array(np.square(np.abs(slc_burst)),slc_img_name)
+    #raw_fig      = plot_2d_array(np.real(slc_matched_raw_burst),raw_img_name,
+    #                             'linear'
+    #                             )    
     
-    # draw circle around location in slc
-    #plot slc burst, raw burst, sm focused burst
-    fig, axs  = plt.subplots(3, 1, figsize=(16,9),constrained_layout=True)
-    SLC_ID = slc_src_file.split('/')[11].split('.')[0]
-    plot_fig_name = f'{SLC_ID}_{location}_SLC_RAW_&_RC_RAW'
+    
+    
+    
+    fig, axs  = plt.subplots(3, 1, figsize=(16,9),constrained_layout=True) 
+    if not info:
+        plot_fig_name = f'{satellite}_{SLC_ID}_[{location[0]:.3f},{location[1]:.3f}]_{date_T_time}'
+    else:
+        plot_fig_name = f'{satellite}_{SLC_ID}_[{location[0]:.3f},{location[1]:.3f}]_Name_{info[0]}_speed_{info[1]}knph_bearing_{info[2]}Deg_TravelTime_{info[3]:.2f}hours_{info[4]}_IW{swath_index+1}_Burst#{burst_number}_{date_T_time}'
     fig.suptitle(f'{plot_fig_name}')
     font_size =8
     
@@ -5786,8 +5834,8 @@ def plot_raw_slc_data(fnames_and_swath, location, pol):
             #axs[i].add_patch(circle)
             # Add text for detected position of ship
             text_offset=[text_offset[0]*-1,text_offset[1]+100]
-            add_text_to_plot(axs[i], f'Grid Based Object labelled @ [{location2[0]},'
-                         f'{location2[1]}]',
+            add_text_to_plot(axs[i], f'Grid Based Object labelled @ [{location2[0]:.0f},'
+                         f'{location2[1]:.0f}]',
                          location2,text_offset,
                          colour='white', arrow_colour='green'
                          )
@@ -5797,16 +5845,115 @@ def plot_raw_slc_data(fnames_and_swath, location, pol):
                                     facecolor='none', linewidth=1
                                     )
             axs[i].add_patch(circle)
-        
-    return fig, burst_number    
+    
+                
+    
+    # Create roi for magnifed area around ship
+    roi_rows_cols = [600,1200]
+    roi_centre    = location2
+    roi_row_start,roi_col_start = place_roi(slc_burst,roi_rows_cols, roi_centre)
+    slc_roi = create_roi(slc_burst,
+                         roi_row_start, 
+                         roi_row_start + roi_rows_cols[0],
+                         roi_col_start,
+                         roi_col_start + roi_rows_cols[1],
+                         )
+    raw_roi = create_roi(slc_matched_raw_burst,
+                         roi_row_start, 
+                         roi_row_start + roi_rows_cols[0],
+                         roi_col_start,
+                         roi_col_start + roi_rows_cols[1],
+                         )
+    
+    fig1, axs1 = plt.subplots(1,2, figsize=(16,9),constrained_layout=True) 
+    fig1.suptitle(f"{slc_img_name.replace('_SLC','_SLC_&_RAW ')}")
+    plot_2d_array_on_ax(axs1[0], np.square(np.abs(slc_roi)),slc_img_name,
+                        'log_normal', font_size, grid_on=1, 
+                        grid_colour=grid_colour
+                        )
+    
+    plot_2d_array_on_ax(axs1[1], np.real(raw_roi),raw_img_name,
+                        'linear', font_size, grid_on=1, 
+                        grid_colour=grid_colour
+                        )
+    
+    if save_fig:
+        print(f'Saving {plot_fig_name} to {save_path}')
+        fig.savefig(f'{save_path}{plot_fig_name}', format='jpg', dpi=600)
+        fig1.savefig(f"{save_path}{slc_img_name.replace('_SLC','_SLC_&_RAW ')}.jpg", format='jpg', dpi=600)
+    
+    
+    
+    print(f'**** {satellite}_{SLC_ID}_{date_T_time} Successfully processed *******')    
+    return fig, fig1, burst_number    
 
 
 
 def intensity(arr):
     return np.square(np.abs(arr))
 
-
 def place_roi(A: np.ndarray, roi_shape: tuple, p: tuple):
+    """
+    Place a region of interest (ROI) of given shape centrally at location p in 2D numpy array A.
+    If ROI extends beyond array edges, position it to include the edge fully.
+
+    Args:
+        A (np.ndarray): 2D numpy array
+        roi_shape (tuple): (num_cols, num_rows) size of region of interest
+        p (tuple): (row, col) coordinate where ROI is to be centered
+
+    Returns:
+        starting_row (int): starting row index of ROI within A
+        starting_col (int): starting column index of ROI within A
+        new_centre        : location in crop of where desired point ends up
+    """
+
+    num_rows, num_cols = roi_shape  # note: roi_shape is (num_cols, num_rows) as per your problem
+    total_rows, total_cols = A.shape
+
+    row_c, col_c = p  # The location p is (row, col)
+
+    # Calculate half sizes (use integer division)
+    half_rows = num_rows // 2
+    half_cols = num_cols // 2
+
+    # Starting row and col with +1 as in your example
+    starting_row = row_c - half_rows + 1
+    starting_col = col_c - half_cols + 1
+    new_centre_r = half_rows
+    new_centre_c = half_cols
+
+    # Correct start if ROI extends beyond top/left edges
+    if starting_row < 0:
+        starting_row = 0
+        new_centre_r = row_c
+    if starting_col < 0:
+        starting_col = 0
+        new_centre_c = col_c
+
+    # Correct start if ROI extends beyond bottom/right edges
+    if starting_row + num_rows > total_rows:
+        starting_row = total_rows - num_rows
+        new_centre_r = row_c - starting_row
+    if starting_col + num_cols > total_cols:
+        starting_col = total_cols - num_cols
+        new_centre_c = col_c - starting_col
+
+    # Ensure no negative indices after correction (in case ROI bigger than array)
+    starting_row = max(0, starting_row)
+    starting_col = max(0, starting_col)
+
+    return int(starting_row), int(starting_col), [new_centre_r, new_centre_c]
+
+
+
+
+
+
+
+
+
+def place_roi_old(A: np.ndarray, roi_shape: tuple, p: tuple):
     """
     Place a region of interest (ROI) of given shape centrally at location p in 2D numpy array A.
     If ROI extends beyond array edges, position it to include the edge fully.
@@ -5851,4 +5998,627 @@ def place_roi(A: np.ndarray, roi_shape: tuple, p: tuple):
     starting_col = max(0, starting_col)
 
     return int(starting_row), int(starting_col)
+
+
+# Timerelated functions
+def convert_string_to_datetime(dt_string: str) -> datetime:
+    """
+    Converts a datetime string in 'YYYYMMDDTHHMMSS' format 
+    (e.g., '20250925T181446') into a Python datetime object.
+    
+    Args:
+        dt_string: The input string.
+        
+    Returns:
+        A datetime.datetime object.
+    """
+    # Define the format code that exactly matches the input string structure.
+    # %Y - Year (4 digits)
+    # %m - Month (01-12)
+    # %d - Day (01-31)
+    # T  - The literal character 'T'
+    # %H - Hour (24-hour clock)
+    # %M - Minute
+    # %S - Second
+    format_code = "%Y%m%dT%H%M%S"
+    
+    # Use datetime.strptime() to parse the string according to the format
+    datetime_object = datetime.strptime(dt_string, format_code)
+    
+    return datetime_object
+
+def round_to_nearest_second(dt: datetime) -> datetime:
+    # Rounds date_time object to nearest second
+    # Microseconds cutoff for rounding up is 500,000 (half a second) 
+    if dt.microsecond >= 500000:
+        # Round up: Add 1 second and then set microseconds to 0
+        dt_rounded = dt + timedelta(seconds=1)
+        # Use .replace(microsecond=0) to reset the microseconds to zero
+        return dt_rounded.replace(microsecond=0)
+    else:
+        # Round down: Just set microseconds to 0
+        return dt.replace(microsecond=0)
+
+def get_acq_time_from_SLC_SAFE_filename(f):
+    """ 
+    Determine acquisiiton time from time stamps in
+    SLC SAFE Dir filename. Use mid-point.
+    Must have SAFE name format as input argument
+    Eg:S1A_IW_SLC__1SDV_20250925T181446_20250925T181513_061148_079F93_E9BB.SAFE
+        
+    Returns mid-time of acquisition rounded to nearest second
+    """
+    start_time_str  = f.split('_')[5]
+    end_time_str    = f.split('_')[6]
+    start_date_time = convert_string_to_datetime(start_time_str)
+    end_date_time   = convert_string_to_datetime(end_time_str)
+    half_time_diff  = (end_date_time - start_date_time)/2
+    mid_date_time   = start_date_time + half_time_diff
+    acq_time        = round_to_nearest_second(mid_date_time)
+    return acq_time
+
+
+#Function to perform polynomial interpolation based on least squares
+#minimization of error
+def get_polynomial_fit(ais_data_file_path, obsv_time, order):
+    #Open AIS data csv file and convert to dataframe
+    if not os.path.exists(ais_data_file_path):
+        print(f'File not found: {ais_data_file_path}')
+        print(f'Exiting!')
+        sys.exit(1)
+    else:        
+        df = pd.read_csv(ais_data_file_path)
+        df['freshness_dt'] = pd.to_datetime(df['freshness'], utc=True)
+        #Localize acq_time to UTC for a proper comparison
+        # The 'Z' on the column means it's UTC, so acq_time must also be UTC-aware for comparison.
+        acq_time_tz = pytz.utc.localize(obsv_time)
+        # Filter for entries strictly GREATER THAN acq_time
+        condition = df['freshness_dt'] > acq_time_tz
+        try:
+            target_index = df[condition].index[0]
+        except IndexError:
+            print("Error: Could not find any row where 'freshness' is strictly greater than 'acq_time'.")
+            sys.exit(1)
+        
+        # --- Main Extraction Steps ---
+        
+        # Get the integer position (iloc) of the target index label
+        target_iloc = df.index.get_loc(target_index)
+        
+        # Calculate the slice boundaries (3 rows before to 2 rows after 
+        # so 6 in total) 
+        # start_iloc: 3 positions before the target, 
+        # ensuring it doesn't go below 0
+        start_iloc = max(0, target_iloc - 3)
+        # end_iloc: two positions after the target. For iloc slicing, 
+        # the end is exclusive, so we use +3
+        end_iloc = min(len(df), target_iloc + 3)
+        
+        # Define the columns to extract
+        columns_to_extract = ['freshness', 'latitude', 'longitude',
+                              'speed', 'course'
+                             ]
+        
+        # Use .iloc to slice the DataFrame by integer position and then 
+        # select columns
+        result_slice = df.iloc[start_iloc:end_iloc][columns_to_extract]
+        times         = pd.to_datetime(result_slice['freshness'].iloc[0:6],
+                                       utc=True
+                                       )
+        time_deltas  = times - times.iloc[0]
+        times_hours  = time_deltas.dt.total_seconds().to_numpy()/3600
+        latitudes    = result_slice['latitude'].to_numpy()
+        latitudes    = np.reshape(latitudes,(len(latitudes),1))
+        longitudes   = result_slice['longitude'].to_numpy()
+        longitudes   = np.reshape(longitudes,(len(longitudes),1))
+        col1         = np.ones((len(latitudes),1))
+        A            = np.zeros((len(latitudes),order))
+        for i in range(order):
+            col=times_hours**i
+            A[:,i] = col
+        
+        b1 = latitudes
+        b2 = longitudes
+        
+        # Perform Singular Value Decomposition on A
+        U, Sigma, Vt = np.linalg.svd(A, full_matrices=False)
+
+        # Compute the pseudo-inverse of Sigma
+        Sigma_inv = np.diag(1 / Sigma)
+
+        # Compute the coefficients using SVD
+        lat_coeffs = Vt.T @ Sigma_inv @ U.T @ b1
+        lon_coeffs = Vt.T @ Sigma_inv @ U.T @ b2
+
+        #Get interpolated position P(t)= c0t^0+c1t^1+c2t^2+c3t^3
+        #Convert obsv_time to hours
+        obsv_time_obj = (acq_time_tz 
+                      - pd.to_datetime(result_slice['freshness'].iloc[0],
+                                       utc=True)
+                      )
+        obsv_time_hours = obsv_time_obj.total_seconds()/3600
+        
+        
+        obsv_lat=0
+        obsv_lon = 0
+        for i in range(order):
+            obsv_lat += lat_coeffs[i]*obsv_time_hours**i
+            obsv_lon += lon_coeffs[i]*obsv_time_hours**i
+            
+            
+    return obsv_lat.tolist(), obsv_lon.tolist()
+           
+
+
+
+
+# Function to return cartesian coordinates with a roi (burst) based
+# on gps location and grids defining boundaries
+
+def get_cartesian_location_in_burst(gps_loc, burst, annotation_file):
+
+    burst_info           = getSwathBurstGridGPSBoundaries(annotation_file)
+    burst_boundaries     = burst_info[1]
+    burst_gps_boundaries = burst_info[2]
+    burst_index          = getGrid(gps_loc, burst_gps_boundaries)
+    swath_index          = int(os.path.basename(annotation_file).split('-')[1][2]) - 1
+    
+    if burst_index == -1:
+        raise ValueError(f'*** Error: Location {location} not found in '
+                         f'{slc_src_file} with boundaries '
+                         f'{burst_info[0]} ... Exiting ****')
+        
+    
+    burst_grid_boundaries     = burst_info[3] 
+    burst_grid_gps_boundaries = burst_info[4]
+    grid_index                = getGrid(gps_loc, 
+                                        burst_grid_gps_boundaries[burst_index]
+                                        ) 
+    if grid_index == -1:
+        raise ValueError(f'*** Error: Location {location} not found in '
+                         f' {slc_src_file} burst#{burst_index+1} with '
+                         f'burst boundaries '
+                         f'{burst_gps_boundaries[burst_index]}'
+                         f' ... Exiting ****'
+                         )
+    
+    # find [row, col] location in swath for gps location using burst 
+    # gps boundaries
+    interp_row, interp_col = getShipInterpolatedPositionInBurst(
+                              gps_loc,
+                              burst_gps_boundaries[burst_index],
+                              burst_boundaries[burst_index]
+                              )
+    burst_based_row = round(interp_row)
+    burst_based_col = round(interp_col)
+    
+    
+    # find [row, col] location in swath for gps location using grid gps boundaries
+    interp_row, interp_col = getShipInterpolatedPositionInGrid(
+                              gps_loc,
+                              burst_grid_gps_boundaries[burst_index][grid_index],
+                              burst_grid_boundaries[burst_index][grid_index]
+                              )
+    grid_based_row = round(interp_row)
+    grid_based_col = round(interp_col)
+    
+    # Convert swath based [row,col] to burst co-ordinates by subtracting starting 
+    # row and starting column
+    burst_start_row = burst_boundaries[burst_index][0][0]
+    burst_start_col = burst_boundaries[burst_index][0][1]
+    location1       = [burst_based_row - burst_start_row,
+                       burst_based_col - burst_start_col
+                       ]
+    location2       = [grid_based_row  - burst_start_row,
+                       grid_based_col  - burst_start_col
+                       ]
+    # Correct for range sampling frequency difference between RAW and SLC
+    sampling_freq_mul= freq_multipliers[swath_index]
+    location1        = [int(location1[0]), int(location1[1]*sampling_freq_mul)]
+    location2        = [int(location2[0]), int(location2[1]*sampling_freq_mul)] 
+    
+    # NOTE: location2 based on sub-grids within burst generally more accurate
+    #       so return it.
+    return location2
+
+
+
+
+
+def plot_I_Q_stats(raw_burst, slc_burst, ship_location, crc_burst, save_path):
+
+    do_visual_check = False
+    burst_crop_data = []
+    crop_size      = [512, 512]
+    ship_crop_size = [150, 150]
+    kernel1         = np.array( [[1,1,1],
+                                 [1,1,1],
+                                 [1,1,1]
+                                 ]
+                                 ) 
+    raw_real_burst      = np.real(raw_burst)
+    raw_imag_burst      = np.imag(raw_burst)
+    slc_intensity       = intensity(slc_burst)
+    slc_intensity_filtered = exclude_high_outliers(slc_intensity,10)
+    r,c, ship_loc_in_crop = place_roi(raw_real_burst, crop_size, ship_location)
+
+    cropped_raw_real_burst = raw_real_burst[r:r + crop_size[0],
+                                            c:c + crop_size[1]]
+    cropped_raw_imag_burst = raw_imag_burst[r:r + crop_size[0],
+                                            c:c + crop_size[1]]
+    #SLC is complex, 
+    cropped_slc_burst = slc_burst[r:r + crop_size[0],
+                                 c:c + crop_size[1]]
+    #Get crop around ship of 150x150, ship located in crop at ship_loc_in_crop
+    #crop_centre = [crop_size[0]//2, crop_size[1]//2]
+    r,c, pos_in_crop= place_roi(cropped_raw_real_burst, ship_crop_size,
+                                 ship_loc_in_crop
+                                 )
+
+    ship_crop_raw_real = cropped_raw_real_burst[r:r + ship_crop_size[0],
+                                 c:c + ship_crop_size[1]]
+    ship_crop_raw_imag = cropped_raw_imag_burst[r:r + ship_crop_size[0],
+                                 c:c + ship_crop_size[1]]
+    ship_crop_slc      = cropped_slc_burst[r:r + ship_crop_size[0],
+                                 c:c + ship_crop_size[1]]
+    ship_crop_slc_I    = np.real(ship_crop_slc)
+    ship_crop_slc_Q    = np.real(ship_crop_slc)
+    ship_crop_slc_intensity = intensity(ship_crop_slc)
+
+
+    #Get pixels of crop outside of ship crop
+    #Create mask to exclude ship crop
+    #Use of mask flattens array so crop_without_ship* arrays are 1D
+    mask = np.ones((crop_size[0], crop_size[1]), dtype=bool)
+    mask[r:r+ship_crop_size[0], c:c+crop_size[1]] = False
+
+    crop_without_ship_slc      = cropped_slc_burst[mask]
+    crop_without_ship_raw_real = cropped_raw_real_burst[mask]
+    crop_without_ship_raw_imag = cropped_raw_imag_burst[mask]
+    crop_without_ship_slc_intensity = intensity(crop_without_ship_slc)
+
+    #Get pixels associated with ship
+    # Set threshold to mean + X std dev of signal in area without ship
+    ship_detection_threshold = ( crop_without_ship_slc_intensity.mean()
+                             + 3*crop_without_ship_slc_intensity.std()
+                                )
+    #Create mask for identifying ship pixels
+    ship_crop_slc_above_threshold = ship_crop_slc_intensity > ship_detection_threshold
+    # Process mask map to remove isolated pixels using erosion/dilation
+    processed_ship_crop_mask = dilation(erosion(ship_crop_slc_above_threshold))
+    ship_pixels = ship_crop_slc_intensity[processed_ship_crop_mask]
+
+
+
+    #burst & crop statistics            
+    raw_burst_I_stats = get_statistics(raw_real_burst)
+    raw_burst_Q_stats = get_statistics(raw_imag_burst)
+    slc_burst_I_stats = get_statistics(np.real(slc_burst))
+    slc_burst_Q_stats = get_statistics(np.imag(slc_burst))
+
+    slc_burst_intensity_stats = get_statistics(slc_intensity)
+    slc_burst_intensity_filtered_stats = get_statistics(slc_intensity_filtered)
+
+    raw_crop_I_stats  = get_statistics(cropped_raw_real_burst)
+    raw_crop_Q_stats  = get_statistics(cropped_raw_imag_burst)
+    slc_crop_I_stats  = get_statistics(np.real(cropped_slc_burst))
+    slc_crop_Q_stats  = get_statistics(np.imag(cropped_slc_burst))
+    crop_slc_intensity_stats = get_statistics(intensity(cropped_slc_burst))
+
+    crop_without_ship_slc_intensity_stats = get_statistics(
+                                              crop_without_ship_slc_intensity
+                                                )
+    raw_ship_crop_I_stats = get_statistics(ship_crop_raw_real)
+    raw_ship_crop_Q_stats = get_statistics(ship_crop_raw_imag)
+    slc_ship_crop_I_stats = get_statistics(ship_crop_slc_I)
+    slc_ship_crop_Q_stats = get_statistics(ship_crop_slc_Q)
+    slc_ship_crop_intensity_stats = get_statistics(ship_crop_slc_intensity)
+
+    #Get ship statistics, size and brightness
+    ship_stats  = get_statistics(ship_pixels)
+    ship_size   = len(ship_pixels)
+    ship_rcs    = ship_size * ship_pixels.mean()
+    #Plot graphs
+    # Plot SLC and equivalent RAW
+    """
+    img_name = f'SLC_{crc_burst}'
+    f=plot_2d_array(np.square(np.abs(slc_burst)), img_name)
+    f.savefig(f'{img_path}/{img_name}.jpg', format='jpg', dpi=600)
+    # Plot RAW burst
+    img_name = f'SLC_matched_Raw_Burst_Real_{crc_burst}'
+    f=plot_2d_array(raw_real_burst,img_name,'linear')
+    f.savefig(f'{img_path}/{img_name}.jpg', format='jpg', dpi=600)
+    """
+
+    #Plot multiple graphs on single plot
+    fig, axs  = plt.subplots(3, 6, figsize=(16,9),constrained_layout=True)
+    num_raw_bins  = 20
+    num_bins  = 100
+    threshold = 10
+    # For example assign the function's plot to subplot 2
+    plot_fig_name = f'{crc_burst}_ship_{ship_location}_RAW_SLC_Histograms'
+    fig.suptitle(plot_fig_name)
+    img_name  = f"Raw_Burst_Real"
+    plot_hist_with_fit_on_ax(axs[0, 0], raw_real_burst, num_raw_bins,
+                             threshold,'gaussian',img_name
+                             )
+    img_name = f"Raw_Imag_Real"
+    plot_hist_with_fit_on_ax(axs[0, 1], raw_imag_burst,num_raw_bins,
+                             threshold,'gaussian',img_name
+                             )
+    img_name = f"SLC_Burst_Real"
+    plot_hist_with_fit_on_ax(axs[0, 2], np.real(slc_burst),num_bins,
+                             threshold, 'gaussian',img_name)
+    img_name = f"SLC_Burst_Imag"
+    plot_hist_with_fit_on_ax(axs[0, 3], np.imag(slc_burst),num_bins,
+                             threshold, 'gaussian',img_name)
+
+    img_name = f"SLC_Burst_Amplitude"
+    plot_hist_with_fit_on_ax(axs[0, 4], np.abs(slc_burst),num_bins,
+                             threshold, 'gamma',img_name)
+    img_name =f"SLC_Burst_Intensity"
+    plot_hist_with_fit_on_ax(axs[0, 5], np.square(np.abs(slc_burst)),num_bins,
+                             threshold, 'weibull',img_name)
+    #Plot Crop data with ship at centre ; crop size = crop_size
+
+    img_name  = f"Raw_Real_Crop"
+    plot_hist_with_fit_on_ax(axs[1, 0], cropped_raw_real_burst, num_bins,
+                             threshold,'gaussian',img_name
+                             )
+    img_name = f"Raw_Imag_Crop"
+    plot_hist_with_fit_on_ax(axs[1, 1], cropped_raw_imag_burst,num_bins,
+                             threshold,'gaussian',img_name
+                             )
+    img_name = f"SLC_Real_Crop"
+    plot_hist_with_fit_on_ax(axs[1, 2], np.real(cropped_slc_burst),num_bins,
+                             threshold, 'gaussian',img_name)
+    img_name = f"SLC_Imag_Crop"
+    plot_hist_with_fit_on_ax(axs[1, 3], np.imag(cropped_slc_burst),num_bins,
+                             threshold, 'gaussian',img_name)
+
+    img_name = f"SLC_Crop_Amplitude"
+    plot_hist_with_fit_on_ax(axs[1, 4], np.abs(cropped_slc_burst),num_bins,
+                             threshold, 'gamma',img_name)
+    img_name =f"SLC_Crop_Intensity"
+    plot_hist_with_fit_on_ax(axs[1, 5], np.square(np.abs(cropped_slc_burst)),num_bins,
+                             threshold, 'weibull',img_name)
+
+    #Plot data for ship only with crop size = ship_crop_size
+    #In this data outliers are not excluded (threshold == 0)
+
+    threshold = 0
+    img_name  = f"Raw_Real_Ship_Crop"
+    plot_hist_with_fit_on_ax(axs[2, 0], ship_crop_raw_real, num_bins,
+                             threshold,'gaussian',img_name
+                             )
+    img_name = f"Raw_Imag_Ship_Crop"
+    plot_hist_with_fit_on_ax(axs[2, 1], ship_crop_raw_imag,num_bins,
+                             threshold,'gaussian',img_name
+                             )
+    img_name = f"SLC_Real_Ship_Crop"
+    plot_hist_with_fit_on_ax(axs[2, 2], np.real(ship_crop_slc),num_bins,
+                             threshold, 'gaussian',img_name)
+    img_name = f"SLC_Imag_Ship_Crop"
+    plot_hist_with_fit_on_ax(axs[2, 3], np.imag(ship_crop_slc),num_bins,
+                             threshold, 'gaussian',img_name)
+
+    img_name = f"SLC_Ship_Crop_Amp"
+    plot_hist_with_fit_on_ax(axs[2, 4], np.abs(ship_crop_slc),num_bins,
+                             threshold, '',img_name)
+    img_name =f"SLC_Ship_Crop_Intensity"
+    plot_hist_with_fit_on_ax(axs[2, 5], intensity(ship_crop_slc),1000,
+                             threshold, '',img_name)
+    # #Plot multiple graphs on single plot
+    fig1, axs1  = plt.subplots(2, 3, figsize=(16,9),constrained_layout=True)
+
+    font_size =8
+    plot_name = f'{crc_burst}_ship_{ship_location}_RAW_SLC'
+    fig1.suptitle(plot_name)
+    img_name  = f"SLC"
+    plot_2d_array_on_ax(axs1[0, 0], slc_intensity,img_name,'log_normal',font_size)
+    # Highlight ship:  Place circle around ship
+    text_offset=[200,200]
+    add_text_to_plot(axs1[0,0], f'Ship @ [{ship_location[0]},'
+                     f'{ship_location[1]}]',
+                     ship_location,text_offset
+                     )
+    circle = patches.Circle((ship_location[1], ship_location[0]), radius=50, edgecolor='red', facecolor='none', linewidth=1)
+    axs1[0,0].add_patch(circle)
+    img_name = f"SLC_crop_for_ship_{ship_location}"
+    plot_2d_array_on_ax(axs1[0, 1], intensity(cropped_slc_burst),img_name,'log_normal',font_size)
+    img_name = f"RAW_crop_{crc_burst}"
+    plot_2d_array_on_ax(axs1[1, 0], cropped_raw_real_burst,img_name,'linear',font_size)
+    img_name = f"Range_compressed_Raw_crop"
+    plot_2d_array_on_ax(axs1[1, 1],
+                        intensity(range_compress_burst(cropped_raw_real_burst)),
+                        img_name,'log_normal',font_size
+                        )
+
+    img_name = f"Ship_crop"
+    plot_2d_array_on_ax(axs1[0, 2],
+                       ship_crop_slc_intensity,
+                        img_name,'log_normal',font_size
+                        )
+    img_name =f'Ship_only_pixels_after_masking'
+    plot_2d_array_on_ax(axs1[1, 2],
+                       ship_crop_slc_intensity*processed_ship_crop_mask +1,
+                        img_name,'log_normal',font_size
+                        )
+
+
+
+    big_crop_size = [1000,1000]
+    r,c, pos_in_crop = place_roi(raw_real_burst, big_crop_size, ship_location)
+
+    cropped_raw_real_burst2 = raw_real_burst[r:r + big_crop_size[0], c:c + big_crop_size[1]]
+    img_name = f"Large_Raw_crop"
+    #plot_2d_array_on_ax(axs1[2, 0], cropped_raw_real_burst2,img_name,'linear')
+
+    #plt.show()   
+
+    #plt.pause(1)
+    if do_visual_check:
+        while True:
+            try:
+                response = int(input(f'What is strength of interferogram on'
+                                     f' scale of 0 to 2; where 0 indicates'
+                                     f' non-visibility, 1 weakly present and'
+                                     f' 2 strongly present: '
+                ))
+                if response in (0, 1, 2):
+                    signal_strength = response
+                    break
+                else:
+                    print('Invalid response. Please enter 0, 1, or 2.')
+            except ValueError:
+                print('Input must be an integer. Please try again.')
+    else:
+        response=-1
+
+    fig.savefig(f'{save_path}{plot_fig_name}.jpg', format='jpg',
+             bbox_inches='tight', dpi=600
+             )
+
+    fig1.savefig(f'{save_path}{plot_name}.jpg', format='jpg',
+            bbox_inches='tight', dpi=600
+            )
+
+    #Assign rows to statistics dataframe
+
+    # Close all figures 
+    fig.clf()
+    fig1.clf()
+    plt.close(fig)
+    plt.close(fig1)
+
+    burst_crop_data.append({
+
+        "Burst Name"       : crc_burst,
+       # "Ship Length"      : ship_length,
+        "Ship Row"         : ship_location[0],
+        "Ship Col"         : ship_location[1],
+        "Signal Strength"  : response,
+        "Burst Raw I Mean" : raw_burst_I_stats[0],
+        "Burst Raw Q Mean" : raw_burst_Q_stats[0],
+        "Burst Raw I StDev": raw_burst_I_stats[1],
+        "Burst Raw Q StDev": raw_burst_Q_stats[1],
+        "Burst SLC I Mean" : slc_burst_I_stats[0],
+        "Burst SLC Q Mean" : slc_burst_Q_stats[0],
+        "Burst SLC I StDev": slc_burst_I_stats[1],
+        "Burst SLC Q StDev": slc_burst_Q_stats[1],
+        "Burst SLC Intensity Mean"  : slc_burst_intensity_stats[0],
+        "Burst SLC Intensity StDev" : slc_burst_intensity_stats[1],
+        "Crop Raw I Mean"  : raw_crop_I_stats[0],
+        "Crop Raw Q Mean"  : raw_crop_Q_stats[0],
+        "Crop Raw I StDev" : raw_crop_I_stats[1],
+        "Crop Raw Q StDev" : raw_crop_Q_stats[1],
+        "Crop SLC I Mean"  : slc_crop_I_stats[0],
+        "Crop SLC Q Mean"  : slc_crop_Q_stats[0],
+        "Crop SLC I StDev" : slc_crop_I_stats[1],
+        "Crop SLC Q StDev" : slc_crop_Q_stats[1],
+        "Crop SLC Intensity Mean"  : crop_slc_intensity_stats[0],
+        "Crop SLC Intensity StDev" : crop_slc_intensity_stats[1],
+
+
+        "Ship Crop Raw I Mean"  : raw_ship_crop_I_stats[0],
+        "Ship Crop Raw Q Mean"  : raw_ship_crop_Q_stats[0],
+        "Ship Crop Raw I StDev" : raw_ship_crop_I_stats[1],
+        "Ship Crop Raw Q StDev" : raw_ship_crop_Q_stats[1],
+        "Ship Crop SLC I Mean"  : slc_ship_crop_I_stats[0],
+        "Ship Crop SLC Q Mean"  : slc_ship_crop_Q_stats[0],
+        "Ship Crop SLC I StDev" : slc_ship_crop_I_stats[1],
+        "Ship Crop SLC Q StDev" : slc_ship_crop_Q_stats[1],
+        "Ship Crop SLC Intensity Mean"  : slc_ship_crop_intensity_stats[0],
+        "Ship Crop SLC Intensity StDev" : slc_ship_crop_intensity_stats[1],
+        "CWS Mean"      : crop_without_ship_slc_intensity_stats[0],
+        "CWS StdDev"    : crop_without_ship_slc_intensity_stats[1],
+        "Ship Mean RCS" : ship_stats[0],
+        "Ship StDev"    : ship_stats[1],
+        "Ship RCS"      : ship_rcs,
+        "Ship Area"     : ship_size
+
+    })
+
+
+    return pd.DataFrame(burst_crop_data)
+
+
+
+
+
+def return_annotation_file(safe_dir, swath_index, pol):        
+    # Get slc image and annotation file names and directories
+    # Use getSLCFilesFromSafeDir function even though don't yet know which swath
+    # is of interest. Using '2' as a dummy placeholder.
+    slc_file_info   = getSLCFilesFromSafeDir(safe_dir,2,pol)
+    annotation_path = slc_file_info[2]
+    slc_path        = annotation_path.replace('annotation','measurement')
+    slc_filenames   = slc_file_info[3]
+    # Get SLC src and annotation file names
+    slc_src_file    = slc_path + slc_filenames[swath_index]
+    annotation_file = annotation_path+change_extension(slc_filenames[swath_index],
+                                                        "xml"
+                                                        )
+    return annotation_file
+
+    
+    
+# Function to locate swath and burst that a gps location is in
+# and return the raw and slc burst. The slc burst is 'de-bursted'
+# ensuring no overlap of contiguous bursts and the raw burst has 
+# matched timings. The slc burst is then re-sampled (if neccessary) 
+# to the same range sampling frequency as the raw burst.
+def return_raw_slc_matched_bursts_for_gps_location(raw_dir,
+                                                   slc_safe_dir,
+                                                   gps_long_lat,
+                                                   pol
+                                                   ):
+    
+
+    fnames_swath = get_raw_slc_annotation_filenames(raw_dir, 
+                                                    slc_safe_dir,
+                                                    gps_long_lat, 
+                                                    pol
+                                                    )
+    raw_file        = fnames_swath[0]
+    slc_src_file    = fnames_swath[1]
+    annotation_file = fnames_swath[2]
+    swath_index     = fnames_swath[3]
+    burst_index     = fnames_swath[4]
+    
+    
+    radar_data      = get_slc_matched_raw_burst_from_file(raw_file, 
+                                                          annotation_file, 
+                                                          burst_index +1, 
+                                                          swath_index +1, 
+                                                          pol
+                                                          ) 
+    raw_burst      = radar_data[0]
+    slc_burst_data = get_slc_burst_from_files(slc_src_file,
+                                              annotation_file,
+                                              burst_index +1
+                                              )
+    non_resampled_slc_burst = slc_burst_data[0]
+
+    # Is this slc burst re-sampled to match raw sampling rate?
+    sampling_freq_mul = freq_multipliers[swath_index]
+    scaling_factor    = int(sampling_freq_mul*non_resampled_slc_burst.shape[1])
+    slc_burst         = resample(non_resampled_slc_burst, scaling_factor)
+
+    return raw_burst, slc_burst, swath_index, burst_index    
+
+
+
+def get_statistics(roi):    
+    mean = roi.mean()
+    std  = roi.std()
+    SNR  = mean/std
+    max_roi  = roi.max()
+    # Get mean of 10 brightest pixels
+    avg10_max = np.sort(roi)[-10:].mean()
+    return mean, std, SNR, max_roi, avg10_max
+
+
+def intensity(arr):
+    return np.square(np.abs(arr))
 
