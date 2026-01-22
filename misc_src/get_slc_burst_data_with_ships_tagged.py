@@ -268,7 +268,7 @@ def get_chip_aoi_in_burst(chip_number, chip_size, burst_size):
 
 def get_chip_image(burst, chip_number, chip_size):
     burst_size = burst.shape
-    aoi = get_chip_aoi_in_burst(chip_number, chip_size, burst_size
+    aoi = get_chip_aoi_in_burst(chip_number, chip_size, burst_size)
     chip = burst[aoi[0][0]:aoi[1][0]+1,aoi[0][1]:aoi[2][1]+1]
     return chip
 

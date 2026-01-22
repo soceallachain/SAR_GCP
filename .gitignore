@@ -8,7 +8,34 @@ __pycache__/
 venv/
 .venv/
 env/
+clean_env/
 
 # Editor/OS temporary files
 .DS_Store
 *~
+
+# Receommended Additions by Gemini
+# --- Security (CRITICAL) ---
+# Prevent uploading Google Service Account keys
+*.json
+key.json
+secrets/
+
+# --- Data & Results ---
+# Prevent uploading massive satellite images or local CSV results
+*.csv
+*.tiff
+*.tif
+*.nc
+*.safe
+*.zip
+*.h5
+data/
+results/
+output/
+
+# --- Local Build Artifacts ---
+# Since you have local libraries, keep these out
+build/
+dist/
+*.egg-info/

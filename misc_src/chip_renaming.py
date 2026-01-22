@@ -41,7 +41,6 @@ else:
 # Strip everything after 'chip#xx' 
 text_strings_real = [re.sub(r'(_chip#\d+).*\.npy$', r'\1', fname) for fname in chip_file_names]
 text_strings_imag = text_strings_real.replace('_real_','_imag_')
-text_strings_binary_mask = 
 
 def copy_file(filename):
     # Check if any of the text strings are in the filename

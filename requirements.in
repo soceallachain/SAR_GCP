@@ -1,0 +1,30 @@
+# Core Science
+numpy
+pandas
+scipy
+numba
+
+# Geospatial
+Cartopy
+geopandas
+geopy
+rasterio
+Shapely
+# Ensure the folder 'sentinel1decoder' is in the same directory where you run pip install
+./sentinel1decoder
+
+# Image & Utils
+opencv-python-headless
+Pillow
+scikit-image
+lxml
+requests
+tqdm
+bitarray
+bitstruct
+cbitstruct
+./bpack
+
+# Google Cloud (Added manually)
+google-cloud-storage
+google-cloud-logging

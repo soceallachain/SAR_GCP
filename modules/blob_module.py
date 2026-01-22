@@ -14,8 +14,8 @@ from scipy.ndimage import label, find_objects, center_of_mass, distance_transfor
 from scipy.spatial.distance import cdist
 from scipy.spatial import cKDTree
 import itertools
-from SAR_code_module import *
-from SAR_focusing_module import *
+from modules.SAR_code_module import *
+from modules.SAR_focusing_module import *
 
 
 from collections import Counter

@@ -42,13 +42,13 @@ import cartopy.feature as cfeature
 from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
 import warnings
-from blob_module import *
+from modules.blob_module import *
 
 from scipy.spatial import distance
 from scipy.spatial.distance import pdist, squareform
 from matplotlib.lines import Line2D
 
-from SAR_focusing_module import *
+from modules.SAR_focusing_module import *
 
 
 

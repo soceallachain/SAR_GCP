@@ -16,14 +16,22 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 import os
-from SAR_focusing_module import *
-from blob_module import *
+from modules.SAR_focusing_module import *
+from modules.blob_module import *
 
-from SAR_code_module import *
+from modules.SAR_code_module import *
 from google.cloud import storage
 from io import BytesIO
 
 
+# --- Configuration ---
+# Replace with your actual project ID and bucket name
+project_id = "ds-ml-vertex-ai"
+bucket_name = "ubot-sar-data"
+
+# --- Execution ---
+# Executes on a VM so knows project id already
+client = storage.Client()
 
 def gcp_list_dir(bucket, prefix):
     blobs=client.list_blobs(bucket, prefix=prefix, delimiter='/')
@@ -122,17 +130,10 @@ def intensity(arr):
 def process_data_on_GCP():
     
     
-    # --- Configuration ---
-    # Replace with your actual project ID and bucket name
-    project_id = "ds-ml-vertex-ai"
-    bucket_name = "ubot-sar-data"
     path = "data/Copernicus/Train/Reports/Train/raw_burst_data/"
     file_name = "xxxx"
-    
-    # --- Execution ---
-    # Executes on a VM so knows project id already
-    client = storage.Client()
     bucket = client.bucket(bucket_name)
+    
     """
     # Get the bucket and the blob (file)
     bucket = client.get_bucket(bucket_name)
@@ -216,8 +217,9 @@ def process_data_on_GCP():
     #exit(0)
     print(f' ***** Past exit *****')
     #read chip file
-    for file in burst_list[:15]:
+    for file in burst_list[:19]:
         if '_real_' not in file:
+            print(f' File {file} does not contain _real_')
             continue
         if file.replace('_real_','_rc_') in files_already_done:
             print(f'{file} already processed. Continuing to next file.')
@@ -246,6 +248,7 @@ def process_data_on_GCP():
             
             
         #Create raw burst as real + i*imag
+        print(f'Found suitable file for range compression {real_file_path}')
         raw_burst = raw_real_burst + 1j * raw_imag_burst
         #Pad raw burst in azimuth and  range
         range_padding = 1000
@@ -265,8 +268,6 @@ def process_data_on_GCP():
         del rc_padded_burst
         rc_padded_burst = resized_rc_padded_burst
         
-    RunningPythonOnGCP_Vertex    
-        
         if save_rc_data:
             rc_raw_burst = file.replace('_real_','_rc_')
             #np.save(f'{dest_dir}/{rc_raw_burst}', rc_padded_burst)
@@ -281,3 +282,8 @@ def process_data_on_GCP():
     
     #?? Do blob detection on chips of 1024x1024 centered on expected ship position
     # and then label with detected position
+
+
+process_data_on_GCP()
+
+

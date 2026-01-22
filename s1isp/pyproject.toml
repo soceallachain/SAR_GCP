@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "Cython", "numpy"]
+build-backend = "setuptools.build_meta"
+
+
+[project]
+name = "s1isp"
+authors = [
+    {name = "Antonio Valentino", email = "antonio.valentino@tiscali.it"},
+]
+description = "Sentinel-1 Instrument Source Packets decoder"
+readme = {file = "README.rst", content-type = "text/x-rst"}
+requires-python = ">=3.8"
+keywords = ["satellite", "decoder", "isp", "sentinel-1", "esa"]
+license = {text = "Apache-2.0"}
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Utilities",
+]
+dependencies = ["bpack[bs,np]", "numpy", "tqdm"]
+dynamic = ["version"]
+
+
+[project.optional-dependencies]
+cli = ["tqdm", "argcomplete"]
+
+
+[project.urls]
+Homepage = "https://github.com/avalentino/s1isp"
+# Documentation = "https://s1isp.readthedocs.io"
+Documentation = "https://github.com/avalentino/s1isp/blob/main/README.rst"
+Repository = "https://github.com/avalentino/s1isp.git"
+Changelog = "https://github.com/avalentino/s1isp/blob/main/docs/NEWS.rst"
+Issues = "https://github.com/avalentino/s1isp/issues"
+
+
+[tool.setuptools]
+packages = ["s1isp"]
+
+
+[tool.setuptools.dynamic]
+version = {attr = "s1isp.__version__"}
+
+
+# [tool.pytest.ini_options]
+# addopts = "--ignore=examples/"
+
+
+[tool.black]
+line-length = 79
+# target-version = ['py311']
+
+
+[tool.isort]
+profile = "black"
+length_sort = true
+no_inline_sort = true
+include_trailing_comma = true
+use_parentheses = true
+line_length = 79
+
+
+[tool.pydocstyle]
+add-ignore = "D105"
+# add-ignore = "D105", "D107"

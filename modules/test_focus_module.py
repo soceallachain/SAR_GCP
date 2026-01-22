@@ -102,8 +102,9 @@ def focus_SM_burst(burst_number: pd.DataFrame, rd:np.array,
     sample_num_along_range_line = np.arange(0, len_range_line, 1)
     #Add offset time due to range_offset
     #fast_time_vec = range_start_time + (range_sample_period * sample_num_along_range_line)
-    fast_time_vec = range_start_time + (range_sample_period * range_offset) 
-                  + (range_sample_period * sample_num_along_range_line)
+    fast_time_vec = ( range_start_time + (range_sample_period * range_offset) 
+                      + (range_sample_period * sample_num_along_range_line)
+                    )
     
     # Slant range vector - defines R0, the range of closest approach, for each range cell
     slant_range_vec      = ((rank * PRI) + fast_time_vec) * c/2
