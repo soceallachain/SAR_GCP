@@ -16,6 +16,7 @@ import random
 import shutil
 # data manipulation
 import shapely
+from shapely.ops import nearest_points
 import cv2
 import pandas as pd
 import numpy as np
@@ -41,14 +42,17 @@ import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
+import geodatasets
+import reverse_geocoder as rg
+import pycountry
 import warnings
-from modules.blob_module import *
+from blob_module import *
 
 from scipy.spatial import distance
 from scipy.spatial.distance import pdist, squareform
 from matplotlib.lines import Line2D
 
-from modules.SAR_focusing_module import *
+from SAR_focusing_module import *
 
 
 
@@ -404,8 +408,8 @@ def get_raw_burst_with_offset_info(SLC_ID, burst_to_get, swath_of_interest=2,
         raw_path =f'/media/joe/WD_12TB_HD1/jc_work/Copernicus/{Dataset}/raw_data'
         slc_path =f'/media/joe/WD_12TB_HD1/jc_work/Copernicus/{Dataset}/slc_data'
     elif source == 'int':    
-        raw_path =f'/home/joe/Work/RSAR/Test/sampleData/{Dataset}/raw_data'
-        slc_path =f'/home/joe/Work/RSAR/Test/sampleData/{Dataset}/slc_data'     
+        raw_path =f'/home/joe/Work/Projects/RSAR/Test/SampleData/{Dataset}/raw_data'
+        slc_path =f'/home/joe/Work/Projects/RSAR/Test/SampleData/{Dataset}/slc_data'     
     elif source == 'Spain':
         raw_path =f'/mnt/smbshare/RAWSARAI_Data/Copernicus/{Dataset}/raw_data'
         slc_path =f'/mnt/smbshare/RAWSARAI_Data/Copernicus/{Dataset}/slc_data'
@@ -1937,8 +1941,36 @@ def float_to_int_list(my_tuple_list):
    return int_list
 
 
+def plot_2d_Capella_array(array, title='Title', _type ='log_normal'):
+    fig, ax = plt.subplots()
+    if _type == 'log_normal':
+        # Assume data detected aleady : detect_data=[np.abs(data)]^2
+        dB_data = 10 * np.log10(array) 
+        im = ax.imshow(dB_data,
+                       vmin = np.percentile(dB_data, 10),
+                       vmax = np.percentile(dB_data, 97), 
+                       aspect = 'equal',
+                       cmap = 'gray',
+                      )
+        #plt.colorbar(im)
+    elif _type == 'linear':
+       im = ax.imshow(array,
+                      vmin = array.min() + 0.3*(array.max() - array.min()),
+                      vmax = 0.9*array.max(),
+                      aspect = 'equal'
+                     )
+    elif _type == 'binary':
+       im = ax.imshow(array, cmap='Greys_r' ,aspect = 'equal')
 
-def plot_2d_array(array, title='Title', _type ='log_normal'):
+    ax.set_title(title)
+    ax.set_xlabel('X-axis')
+    ax.set_ylabel('Y-axis')
+    plt.show()
+    return fig, ax
+
+
+
+def plot_2d_array(array, title='Title', _type ='log_normal', xlabel='X-axis', ylabel='Y-axis'):
     fig, ax = plt.subplots()
     if _type == 'log_normal':
         im = ax.imshow(array,norm=colors.LogNorm(vmin=10,vmax = 1000000), aspect = 'auto')
@@ -1949,10 +1981,178 @@ def plot_2d_array(array, title='Title', _type ='log_normal'):
        im = ax.imshow(array, cmap='Greys_r' ,aspect = 'auto')
 
     ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    plt.show()
+    return fig, ax
+
+
+def plot_2d_array_with_labelled_points(array, points, title='Title', _type ='log_normal'):
+    fig, ax = plt.subplots()
+    if _type == 'log_normal':
+        im = ax.imshow(array,norm=colors.LogNorm(vmin=10,vmax = 1000000), aspect = 'auto')
+        #plt.colorbar(im)
+    elif _type == 'linear':
+       im = ax.imshow(array,vmin=array.min(), vmax=array.max(), aspect = 'auto')
+    elif _type == 'binary':
+       im = ax.imshow(array, cmap='Greys_r' ,aspect = 'auto')
+# --- Added Code to Draw Circles ---
+    if points:
+        # Unpack the list of (row, col) tuples. 
+        # Note: 'col' maps to X-axis, 'row' maps to Y-axis
+        rows, cols = zip(*points)
+        
+        # s=200 sets the size of the circle marker
+        # facecolors='none' keeps the inside hollow so you can see the array underneath
+        # edgecolors sets the color of the circle boundary
+        ax.scatter(cols, rows, s=200, facecolors='none', edgecolors='red', linewidths=2, label='Points')
+        ax.legend()
+    # ----------------------------------
+    ax.set_title(title)
     ax.set_xlabel('X-axis')
     ax.set_ylabel('Y-axis')
     plt.show()
-    return fig
+    return fig, ax
+
+
+#Add labelled points to a figure
+def add_circles_to_figure(ax, locations, radius=25, edge_colour='red', linewidth=2):
+# --- Added Code using Circle Patches ---
+    # Define a radius size (adjust this number depending on your array dimensions)
+    circle_radius = radius 
+    
+    for row, col in locations:
+        # Note: Circle takes center as (X, Y), which corresponds to (col, row)
+        circle = patches.Circle((col, row), radius=circle_radius, 
+                               edgecolor=edge_colour, facecolor='none', linewidth=2)
+        ax.add_patch(circle)
+
+
+
+#
+# Function to return [row,col] co-ordinates of ships in a burst based
+# Returns coords in orginal slc burst and for burst matched with raw sampling
+# rate 
+def get_ship_row_col(ship_coords, slc_filename, burst_info, burst_number):
+    
+    
+   IW_MODE = next((int(part.replace('iw', '')) 
+                    for part in slc_filename.split('-') 
+                    if 'iw' in part), None
+                   )
+   sampling_freq_mul = freq_multipliers[IW_MODE-1]
+     
+   bounding_box_size         = 100
+   border                    = 25
+   swath_bounding_boxes, burst_indices = getShipBoundingBoxes(ship_coords,
+                                                burst_info[1],
+                                                burst_info[2],
+                                                burst_info[3],
+                                                burst_info[4],
+                                                bounding_box_size)
+   
+   num_bursts   = len(burst_info[1])
+   burst_counts = [burst_indices.count(i) for i in range(0, num_bursts)]
+   burst_index = burst_number -1
+   num_ships_in_burst = burst_counts[burst_index]
+   
+   if num_ships_in_burst ==0:
+       print(f' No ships in burst#{burst_number}!')
+       
+       
+   burst_dims = np.array(burst_info[1][burst_index])
+   burst_start_offset = burst_dims[0,0]
+   burst_col_offset   = burst_dims[0,1]   ### Check this same as burst_boundary[0][1]
+   burst_size=[(burst_dims[1,0]-burst_start_offset),round(burst_dims[2,1]*sampling_freq_mul)]
+   #Get ships in each burst
+   ship_indices = np.where(np.array(burst_indices) == burst_index)[0]
+   
+   ship_raw_matched_locations=[]
+   ship_non_raw_matched_locations=[]
+   # Get ship locations in raw matched slc_file -> return burst number
+   for ship_number in ship_indices:
+       print(f'Swath Bounding box for ship at index {ship_number} is {swath_bounding_boxes[ship_number]}')
+       ship_bounding_box = Polygon(swath_bounding_boxes[ship_number])
+       ship_centroid = ship_bounding_box.centroid
+       # Shapely uses loc.x amd loc.y not indexing. Note [row,col] of 
+       # image format means row == .y and col == .x
+       # Have to re-sample in range (column , or .x) direction ????????
+       ship_location = [round(ship_centroid.x) - burst_start_offset,
+                        round((ship_centroid.y - burst_col_offset) * sampling_freq_mul)
+                       ]
+       #Get location of ship in matched and non-matched raw-burst [row, col]
+       ship_non_raw_matched_burst_row = ship_location[0]
+       ship_non_raw_matched_burst_col = round(ship_centroid.y - burst_col_offset)
+       #ship_locations.append([ship_burst_row,ship_burst_col])
+       #ship_locations.append(ship_location)
+       # return ship locations matched to raw and original slc (non-raw-matched)
+       ship_raw_matched_locations.append(ship_location)
+       ship_non_raw_matched_locations.append([ship_non_raw_matched_burst_row,
+                                              ship_non_raw_matched_burst_col
+                                              ]
+                                             )
+   return ship_raw_matched_locations, ship_non_raw_matched_locations, ship_indices
+   
+ 
+#
+# Function determines ships coordinates within a burst from label file
+# Extracts burst and its boundary information from the SLC annotation file 
+def plot_burst_and_ships(slc_file, slc_annotation_file, 
+                         burst_number, label_file, raw_matched=True
+                         ):
+    
+    SLC_ID = next((part[:-5] for part in slc_file.split('/') 
+                             if part.endswith('.SAFE')), None
+                  )
+    
+    IW_MODE = next((int(part.replace('iw', '')) 
+                    for part in slc_file.split('-') 
+                    if 'iw' in part), None
+                   )
+    #burst_number = 4
+    sampling_freq_mul = freq_multipliers[IW_MODE-1]
+    
+    
+    # Get co-ordinates of ships in SLC file based on unfiltered list of ships in label file
+    # If want to discriminate on ship size use a different label file
+    ship_data   = getShipCoordinatesLengthConfidence(label_file, 
+                                                     IW_MODE, 
+                                                     SLC_ID
+                                                     )
+    ship_coords = ship_data[0]
+    
+    burst_data,num_bursts, burst_info = get_slc_burst_from_files(slc_file, 
+                                                               slc_annotation_file,
+                                                               burst_number
+                                                               )
+    
+    ship_info = get_ship_row_col(ship_coords, slc_file, burst_info, burst_number)
+   
+    ship_row_col_matched     = ship_info[0]
+    ship_row_col_non_matched = ship_info[1]
+    ship_indices             = ship_info[2]
+    
+    # get ship locations in burst -> use gps_lon_lat of ships and interpolate
+    
+    # Need to re-sample SLC burst to same range sampling as raw burst
+    scaling_factor    = int(freq_multipliers[IW_MODE -1]*burst_data.shape[1])
+    if raw_matched:
+       burst_data      = resample(burst_data, scaling_factor)
+       ship_locations  = ship_row_col_matched
+       print(f'Viewing raw matched SLC burst. Burst size is {burst_data.shape}')
+    else:
+        ship_locations = ship_row_col_non_matched
+        print(f'Viewing non-raw matched SLC burst. Burst size is {burst_data.shape}')
+        
+    f,ax=plot_2d_array(intensity(burst_data),f'Burst#{burst_number}', 
+                        xlabel ='Range', ylabel='Azimuth'
+                        )
+    f.suptitle(SLC_ID, fontsize=10)
+    add_circles_to_figure(ax, ship_locations)
+    return f,ax, ship_info, ship_data[0]
+
+
+
 
 
 # Plot 2D array in location defined by handle ax
@@ -2187,7 +2387,102 @@ def get_scene_id(SLC_Product_ID):
     return scene_id
 
 
-def get_sea_status(gps_coords, plot_map):
+def get_sea_status(gps_coords, plot_map=False):
+    """
+    Determines if an ROI (list of 4 [lon, lat] points) contains land.
+    If sea-based, finds the nearest land and identifies the country.
+    """
+    # 1. Setup ROI
+    roi_polygon = Polygon(gps_coords)
+    centroid = roi_polygon.centroid
+    center_lat, center_lon = centroid.y, centroid.x
+    
+    # 2. Load Political Land Geometries (GeoJSON is more reliable for URLs)
+    # This dataset includes the 'name' column for countries
+    # url = "https://raw.githubusercontent.com/datasets/geo-boundaries-world-110m/master/countries.geojson"
+
+    # 1:10m is the highest resolution available from Natural Earth.
+    # It includes virtually all inhabited islands and many uninhabited ones.
+    url = "https://naciscdn.org/naturalearth/10m/cultural/ne_10m_admin_0_countries.zip"
+    try:
+        land_gdf = gpd.read_file(url)
+    except Exception as e:
+        print(f"Error loading map data: {e}")
+        return None, "Data Error", 0
+
+    # Create a single geometry for intersection checks
+    land_geometry = land_gdf.union_all() 
+
+    # 3. Check Land vs Sea
+    is_land = land_geometry.intersects(roi_polygon)
+    
+    if is_land:
+        # Identify the country by intersection
+        intersected_df = land_gdf[land_gdf.intersects(roi_polygon)]
+        # Robustly find name column (usually 'name' in GeoJSON)
+        name_col = next((c for c in intersected_df.columns if c.lower() == 'name'), 'name')
+        country_names = intersected_df[name_col].tolist()
+        country = country_names[0] if country_names else "Unknown Land"
+        min_dist = 0
+        nearest_lat, nearest_lon = center_lat, center_lon
+        print(f"The ROI is land-based in: {country}")
+    else:
+        print("The ROI is sea-based. Calculating nearest land...")
+        # Efficiently find the single closest point on the world's landmass
+        # nearest_points returns (point_on_roi, point_on_land)
+        _, nearest_land_geom = nearest_points(roi_polygon, land_geometry)
+        nearest_lat, nearest_lon = nearest_land_geom.y, nearest_land_geom.x
+        
+        # Calculate precise geodesic distance
+        min_dist = geodesic((center_lat, center_lon), (nearest_lat, nearest_lon)).kilometers
+        
+        # Use offline reverse_geocoder to identify the country of that nearest land point
+        # Input must be [(lat, lon)]
+        res = rg.search([(nearest_lat, nearest_lon)])[0]
+        try:
+            country = pycountry.countries.get(alpha_2=res['cc']).name
+        except:
+            country = res['cc'] # Fallback to code if name not found
+            
+        print(f"Nearest land is {min_dist:.2f} km away in {country} ({res['name']})")
+
+    # 4. Plotting
+    if plot_map:
+        fig, ax = plt.subplots(figsize=(10, 10), subplot_kw={'projection': ccrs.PlateCarree()})
+        
+        # Determine extent based on ROI and nearest land
+        min_lon, min_lat, max_lon, max_lat = roi_polygon.bounds
+        margin = 2.0  # Degrees
+        ax.set_extent([min(min_lon, nearest_lon) - margin, 
+                       max(max_lon, nearest_lon) + margin, 
+                       min(min_lat, nearest_lat) - margin, 
+                       max(max_lat, nearest_lat) + margin])
+
+        ax.add_feature(cfeature.COASTLINE)
+        ax.add_feature(cfeature.LAND, facecolor='#e0e0e0')
+        ax.add_feature(cfeature.OCEAN, facecolor='#afeeee')
+        ax.add_feature(cfeature.BORDERS, linestyle=':')
+
+        # Plot ROI
+        roi_x, roi_y = roi_polygon.exterior.xy
+        ax.plot(roi_x, roi_y, color='red', linewidth=2, label='ROI')
+        ax.scatter(center_lon, center_lat, color='blue', label='ROI Center')
+        
+        if not is_land:
+            ax.scatter(nearest_lon, nearest_lat, color='green', label='Nearest Land')
+            ax.plot([center_lon, nearest_lon], [center_lat, nearest_lat], 
+                    color='black', linestyle='--', transform=ccrs.Geodetic())
+
+        ax.legend()
+        plt.title(f"ROI Status: {'Land' if is_land else 'Sea'}\nNearest Country: {country}")
+        plt.show()
+
+    return is_land, country, min_dist
+
+
+
+
+def get_sea_statusi_old(gps_coords, plot_map):
     """
     Function to return whether ROI specified by gps_coords is wholly sea
     based or whether there is land within the boundary.
@@ -2244,7 +2539,9 @@ def get_sea_status(gps_coords, plot_map):
         ax.scatter(center_lon, center_lat, color='blue', label='ROI Center')
     
     # Load global land geometries
-    land_gdf = gpd.read_file(gpd.datasets.get_path('naturalearth_lowres'))
+    path = geodatasets.get_path("naturalearth.land")
+    #land_gdf = gpd.read_file(gpd.datasets.get_path('naturalearth_lowres'))
+    land_gdf = gpd.read_file(path)
     land_geometry = land_gdf.geometry.unary_union  # Combine all land polygons
     
     # Check if the ROI is on land or sea
@@ -2331,9 +2628,185 @@ def get_sea_status(gps_coords, plot_map):
 
 
 ###############################################################################
-# Sereis of functions to interrogate SM SLC files and return reference gps 
+# Series of functions to interrogate SM SLC files and return reference gps 
 # and grid co-ordinates
 #
+#
+# Function to return grid points and gps grid points for Stripmap file
+# Usually only 1 Azimuth Block of echo data in Stripmap - but might be more
+# Here it is assumed that there is only 1
+# References to bursts are a relic of IW mode processiing
+#                          
+def get_SM_GridGPSBoundaries(annotation_file):
+
+    
+    tree = etree.parse(annotation_file)
+    root = tree.getroot()         
+   
+    nLines         = int(root.find('.//numberOfLines').text)
+    nRangeSamples  = int(root.find('.//numberOfSamples').text)
+    
+    nBurstLines    = int(root.find('.//linesPerBurst').text)
+    
+    azTimeInterval = float(root.find('.//azimuthTimeInterval').text)
+    
+    print(f'Number of azimuth lines in each burst is {nLines}')
+    print(f'Number of lines  is {nLines}')
+    print(f'Number of Samples is {nRangeSamples}')
+    burst_number    = 0
+    burstGridPoints = []
+    for burstGridPoint in root.findall('.//geolocationGridPoint'):
+        azimuth_time = burstGridPoint.find('.//azimuthTime').text
+        longitude    = burstGridPoint.find('.//longitude').text
+        latitude     = burstGridPoint.find('.//latitude').text
+        line         = burstGridPoint.find('.//line').text
+        pixel        = burstGridPoint.find('.//pixel').text
+
+        if pixel =='0':
+            burst_number +=1
+
+        azimuth_burst_end_time = datetime.strptime(azimuth_time,
+                                                   '%Y-%m-%dT%H:%M:%S.%f') \
+                                  + timedelta(seconds
+                                  = (nBurstLines * azTimeInterval))
+
+        burstGridPoints.append({
+            'azimuth_time': azimuth_time,
+             'longitude': longitude,
+             'latitude': latitude,
+             'line': line,
+             'pixel': pixel,
+             'burst_number' : str(burst_number),
+             'azimuth_burst_end_time': azimuth_burst_end_time
+
+        })
+    #Get Ground Control Points from GeoLocationGridPoints
+    df                = pd.DataFrame(burstGridPoints)
+    gridPoints        = df[['burst_number','line','pixel',
+                            'longitude','latitude']]
+    gridControlPoints = gridPoints.to_numpy().astype(float)
+
+    pixel_value = '0'
+    burst_start_times = df[df['pixel'] == pixel_value]['azimuth_time']
+    burst_end_time = []
+    number_overlap_lines = []
+    for i in range(0,len(burst_start_times)-1):
+        # Convert string to datetime object
+        t = datetime.strptime(burst_start_times.iloc[i],
+                              '%Y-%m-%dT%H:%M:%S.%f')
+        # Add burst interval time to start time
+        t = t + timedelta(seconds=(nBurstLines*azTimeInterval))
+        # Subtract end time of burst i from start of next burst i+1
+        overlap_time = t- datetime.strptime(burst_start_times.iloc[i+1],
+                                            '%Y-%m-%dT%H:%M:%S.%f')
+        overlap_lines = 0   # Kludge for SM mode where no overlap ... or burstys
+        #overlap_lines = round(overlap_time.total_seconds() / azTimeInterval)
+        # Convert back to string if necessary (optional)
+        burst_end_time.append(t)
+        number_overlap_lines.append(overlap_lines)
+
+    overlap_offset_lines = [x//2 for x in number_overlap_lines]
+    merged_burst_start_line = []
+    merged_burst_end_line   = []
+    burst_corners           = []
+    burst_gps_corners       = []
+    gridPoints['merged_burst_start_line']= 0
+    gridPoints['merged_burst_end_line']  = 0
+
+    burst_ends           = gridPoints[(gridPoints['pixel']
+                                 == str(nRangeSamples-1))]
+    burst_starts         = gridPoints[(gridPoints['pixel'] == str(0))]
+    burst_end_long_lat   = burst_ends[['longitude',
+                                       'latitude']].to_numpy().astype(float)
+    burst_start_long_lat = burst_starts[['longitude',
+                                         'latitude']].to_numpy().astype(float)
+
+    burst_grid_corners  = []
+    burst_grid_gps      = []
+    #for i in range(0,nBursts):
+    for i in range (0,len(burst_start_times)-1):
+        burst_start_line  = gridPoints[gridPoints['burst_number']
+                                 == str(i+1)]['line'].to_numpy().astype(int)[0]
+        burst_end_line    = gridPoints[gridPoints['burst_number']
+                                 == str(i+2)]['line'].to_numpy().astype(int)[0]
+        if i==0:
+            #+ round(np.mean(overlap_offset_lines))  
+            # NOT SURE ABOUT THIS, but may be source of offset 
+            merged_start_line = burst_start_line
+            merged_end_line   = (burst_end_line
+                                - round(overlap_offset_lines[i]))
+        else:
+            merged_start_line = (burst_start_line
+                                + round(overlap_offset_lines[i-1]))
+            merged_end_line   = (burst_end_line
+                                - round(overlap_offset_lines[i]))
+
+        gridPoints.loc[gridPoints['burst_number'] == str(i+1),
+                                  'merged_burst_start_line'] = merged_start_line
+
+        gridPoints.loc[gridPoints['burst_number'] == str(i+1),
+                                  'merged_burst_end_line']   = merged_end_line
+
+        burst_corners.append([(merged_start_line,0),
+                              (merged_end_line,0),
+                              (merged_end_line,nRangeSamples-1),
+                              (merged_start_line,nRangeSamples-1)]
+                              )
+
+        burst_gps_corners.append([burst_start_long_lat[i,:],
+                                  burst_start_long_lat[i+1,:],
+                                  burst_end_long_lat[i+1,:],
+                                  burst_end_long_lat[i,:]]
+                                  )
+
+        ##### Add code for sub-grids
+        boi1           = gridPoints[(gridPoints['burst_number'] == str(i+1))]
+        boi2           = gridPoints[(gridPoints['burst_number'] == str(i+2))]
+        # Check why burst coords work with getGrid but burst_grid coords don't
+        long_lat_start = boi1[['longitude','latitude']].to_numpy().astype(float)
+        long_lat_end   = boi2[['longitude','latitude']].to_numpy().astype(float)
+        range_col      = boi1['pixel'].to_numpy().astype(int)
+        grid_corners   = []
+        grid_gps       = []
+        for j in range(0,len(boi1)-1):
+            grid_corners.append([(merged_start_line,range_col[j]),
+                                 (merged_end_line, range_col[j]),
+                                 (merged_end_line, range_col[j+1]),
+                                 (merged_start_line, range_col[j+1])]
+                                 )
+            grid_gps.append([long_lat_start[j,:],
+                             long_lat_end[j,:],
+                             long_lat_end[j+1,:],
+                             long_lat_start[j+1,:]]
+                             )
+        burst_grid_corners.append(grid_corners)
+        burst_grid_gps.append(grid_gps)
+
+    #Define boundaries of SLC file 
+    file_corners = [(0,0),(nLines-1,0),
+                   (nLines-1,nRangeSamples-1),(0,nRangeSamples-1)]
+    #gps corner locations for ROI of IW swath - Note values are strings
+    gps_corners = find_coordinates_array(df, file_corners)
+    print(f'GPS corners of SLC file are {gps_corners}')
+
+    sm_grid_gps_info=[]
+    sm_grid_gps_info.append(gps_corners)
+    sm_grid_gps_info.append(burst_corners)
+    sm_grid_gps_info.append(burst_gps_corners)
+    sm_grid_gps_info.append(burst_grid_corners)
+    sm_grid_gps_info.append(burst_grid_gps)
+    #return gps_corners, burst_corners, burst_gps_corners, burst_grid_corners, burst_grid_gps, burst_info
+    return sm_grid_gps_info
+
+
+
+
+
+
+
+
+
+###############################################################################
 def get_SM_GridPoints(SM_SLC_annotation_file):
     """
     Function to extract dataframe of location and timing
@@ -2348,7 +2821,7 @@ def get_SM_GridPoints(SM_SLC_annotation_file):
     
     Input: Strip Mode SLC annotation xml file
     Output: Dataframe with locations of each reference grid point in 
-            GPS and grid co-ordinates along with aximuth time for 
+            GPS and grid co-ordinates along with azimuth time for 
             for start of grid line.
     """
     bursts =[]
@@ -2369,12 +2842,13 @@ def get_SM_GridPoints(SM_SLC_annotation_file):
         latitude     = burstGridPoint.find('.//latitude').text
         line         = burstGridPoint.find('.//line').text
         pixel        = burstGridPoint.find('.//pixel').text
+        slant_range_time =  burstGridPoint.find('.//slantRangeTime').text
 
         if pixel =='0':
             burst_number +=1
-
-        azimuth_burst_end_time = azimuth_time + timedelta(seconds
-                                  = (nBurstLines * azTimeInterval))
+            azimuth_burst_end_time = azimuth_time + timedelta(seconds
+                                      = (nBurstLines * azTimeInterval)
+                                      )
         burstGridPoints.append({
             'azimuth_time': azimuth_time,
              'longitude': longitude,
@@ -2382,14 +2856,117 @@ def get_SM_GridPoints(SM_SLC_annotation_file):
              'line': line,
              'pixel': pixel,
              'burst_number' : str(burst_number),
-             'azimuth_burst_end_time': azimuth_burst_end_time
+             'azimuth_burst_end_time': azimuth_burst_end_time,
+             'slant_range_time' : slant_range_time
 
         })
     #Get Ground Control Points from GeoLocationGridPoints
     df                = pd.DataFrame(burstGridPoints)
-    gridPoints        = df[['burst_number','line','pixel','longitude','latitude']]
-    gridControlPoints = gridPoints.to_numpy().astype(float)
+    #gridPoints        = df[['burst_number','line','pixel','longitude','latitude']]
+    #gridControlPoints = gridPoints.to_numpy().astype(float)
     return(df)
+
+
+
+
+###############################################################################
+## Function to return both meta data and radar data for a Stripmap file
+## Assumes only one signal echo (burst) or azimuth block with radar data
+## If > 1 use something else
+
+
+def get_SM_data(raw_file):
+        
+#    l0file = sentinel1decoder.Level0File(raw_file)
+    
+    raw_burst_info, l0file = get_SM_raw_burst_info(raw_file)
+    if len(raw_burst_info)>1:
+        print(f'Warning: More than 1 SM Azimuth Block - need to process'
+              f'differently!')
+    
+    else:
+        # Finds first burst/block that is a signal echo
+        selected_burst = raw_burst_info[0].index[0]
+        meta_data      = l0file.get_burst_metadata(selected_burst)
+        radar_data     = l0file.get_burst_data(selected_burst)
+        
+    return meta_data, radar_data, l0file
+    
+
+
+
+
+
+###############################################################################
+##  July 9th 2026
+## Function to determine offset between start/end of raw file and slc in
+## both azimuth and range.
+## Based on timings in raw meta data and slc annotation file
+## Matches azimuth line start time (? mid-slant range?) in both raw and slc
+## Range matching currently assumed symmetrical - but may not be
+##
+def get_SM_raw_slc_offsets(raw_file, slc_annotation_file):
+    
+    
+    raw_burst_info, l0file = get_SM_raw_burst_info(raw_file)
+    if len(raw_burst_info)>1:
+        print(f'Warning: More than 1 SM Azimuth Block - need to process'
+              f'differently!')
+    
+    else:
+        selected_burst = raw_burst_info[0].index[0]
+        #l0file         = sentinel1decoder.Level0File(raw_file)
+        selection      = l0file.get_burst_metadata(selected_burst)
+        radar_data     = l0file.get_burst_data(selected_burst)
+        
+    slc_burst_info = get_SM_GridPoints(slc_annotation_file)
+    tree = etree.parse(slc_annotation_file)
+    root = tree.getroot()
+    
+    # SLC parameters
+    n_slc_az_lines      = int(root.find('.//numberOfLines').text)
+    n_slc_range_samples = int(root.find('.//numberOfSamples').text)
+    azTimeInterval      = float(root.find('.//azimuthTimeInterval').text)
+    az_pri              = float(root.find('.//pri').text)
+    range_sampling_rate = float(root.find('.//rangeSamplingRate').text)
+    
+                                                                                   
+    
+    # Raw parameters 
+    n_raw_az_lines      = raw_burst_info[0]['Num Azimuth Lines'].iloc[0]
+    n_raw_range_samples = raw_burst_info[0]['Number of Quads'].iloc[0] *2
+    
+    
+    raw_start_time = raw_burst_info[0]['Burst Start Time']
+    slc_start_time = slc_burst_info.query("line == '0' and pixel == '0'"
+                                          )['azimuth_time']
+    
+    delta = (slc_start_time.iloc[0] - raw_start_time.iloc[0]).total_seconds()
+    # Get slc offset from first line of raw data
+    slc_az_start_offset_from_raw = int(np.ceil(delta / az_pri))
+    slc_az_end_offset_from_raw   = int((n_raw_az_lines 
+                                 -  (slc_az_start_offset_from_raw + n_slc_az_lines))
+                                   )
+    """
+    #Check if any difference from mide
+    mid_range_pixel = n_slc_range_samples /2 
+    closest_row_label = (pd.to_numeric(slc_burst_info['pixel']) 
+                        - mid_range_pixel).abs().idxmin()
+    #Look up the azimuth_time for that row
+    mid_range_azimuth_time = slc_burst_info.loc[closest_row_label, 'azimuth_time']
+    delta_from_mid = (mid_range_azimuth_time - raw_start_time.iloc[0]).total_seconds()
+    slc_az_start_offset_from_raw_mid = np.ceil(delta / az_pri)
+    """
+    
+    # Check from range offset 
+    range_sample_diff = n_raw_range_samples - n_slc_range_samples
+    slc_range_start_offset = int(np.round(range_sample_diff / 2 ))
+    slc_range_end_offset   = int(np.round(n_raw_range_samples - (slc_range_start_offset + n_slc_range_samples)))
+    
+    return slc_az_start_offset_from_raw, slc_az_end_offset_from_raw, slc_range_start_offset, slc_range_end_offset
+
+
+
 
 
 
@@ -2583,13 +3160,24 @@ def get_raw_burst_info(raw_filename):
         IW.append(result)
     return(IW)
 
-#
+##
+## Function to determine start and end time of SM raw 'burst' and report
+## number of lines and range-samples. Also returns all the decoded data
+## so can be used in other functions and reduces memory requirements by 
+## preventing duplication
+##
 def get_SM_raw_burst_info(raw_filename):
     raw_data = sentinel1decoder.Level0File(raw_filename)
                
     SM=[]
-    swath_number = int(re.search(r's1a-s(\d+)-', raw_filename).group(1)) -1
-    filtered_df = raw_data.packet_metadata[raw_data.packet_metadata['Swath Number'] == swath_number]
+    # Note: Labelling of SM swaths starts at 0  => S6 -> Swath Number of 5
+    swath_number = int(raw_filename.split('-')[1][1]) - 1
+    #swath_number = int(re.search(r's1a-s(\d+)-', raw_filename).group(1)) -1
+    #filtered_df = raw_data.packet_metadata[raw_data.packet_metadata['Swath Number'] == swath_number]
+    filtered_df = raw_data.packet_metadata[
+        (raw_data.packet_metadata['Swath Number'] == swath_number) & 
+        (raw_data.packet_metadata['Signal Type'] == 0)
+    ]
     result = filtered_df.groupby('Azimuth Block Number').agg(['first', 'last'])
     result.reset_index()[['Azimuth Block Number', 'Coarse Time', 
                           'Fine Time', 'ECC Number','Signal Type',
@@ -2617,7 +3205,7 @@ def get_SM_raw_burst_info(raw_filename):
     number_of_azimuth_lines = packet_numbers2 - packet_numbers1 + 1 
     result['Num Azimuth Lines']=number_of_azimuth_lines
     SM.append(result)
-    return(SM)
+    return SM, raw_data
 
 # Function to return time before and after mid-point of burst for which 
 # SLC data was used for de-merged bursts
@@ -2764,6 +3352,95 @@ def find_raw_start_burst(raw_data, slc_data):
         
     return min_positive_diff_index
   
+
+#
+def get_SM_BurstBoundaries(annotation_file):
+    
+    tree = etree.parse(annotation_file)
+    root = tree.getroot()
+    
+    nLines         = int(root.find('.//numberOfLines').text)
+    nRangeSamples   = int(root.find('.//numberOfSamples').text)
+    #nBursts        = len(bursts)
+    azTimeInterval = float(root.find('.//azimuthTimeInterval').text)
+    
+    burst_number    = 0
+    burstGridPoints = []
+    for burstGridPoint in root.findall('.//geolocationGridPoint'):
+        azimuth_time = burstGridPoint.find('.//azimuthTime').text
+        longitude    = burstGridPoint.find('.//longitude').text
+        latitude     = burstGridPoint.find('.//latitude').text
+        line         = burstGridPoint.find('.//line').text
+        pixel        = burstGridPoint.find('.//pixel').text
+
+        if pixel =='0':
+            burst_number +=1
+        # burst_end_time not used. Would remove but want to keep fn close to 
+        # getBurstBoundaries
+        azimuth_burst_end_time = datetime.strptime(azimuth_time, 
+                                                   '%Y-%m-%dT%H:%M:%S.%f') \
+                                  + timedelta(seconds 
+                                  = (0 * azTimeInterval))
+
+        burstGridPoints.append({
+            'azimuth_time': azimuth_time,
+             'longitude': longitude,
+             'latitude': latitude,
+             'line': line,
+             'pixel': pixel,
+             'burst_number' : str(burst_number),
+             'azimuth_burst_end_time': azimuth_burst_end_time
+        })
+    #Get Ground Control Points from GeoLocationGridPoints
+    df                = pd.DataFrame(burstGridPoints)
+    gridPoints        = df[['burst_number','line','pixel',
+                            'longitude','latitude']]
+    gridControlPoints = gridPoints.to_numpy().astype(float)
+    
+    pixel_value = '0'
+    burst_start_times = df[df['pixel'] == pixel_value]['azimuth_time']
+    burst_end_time = []
+   
+    merged_burst_start_line = []
+    merged_burst_end_line   = []
+    burst_corners           = []
+    burst_gps_corners       = []
+    gridPoints['merged_burst_start_line']= 0
+    gridPoints['merged_burst_end_line']  = 0
+    
+    burst_ends           = gridPoints[(gridPoints['pixel'] 
+                                 == str(nRangeSamples-1))]
+    burst_starts         = gridPoints[(gridPoints['pixel'] == str(0))]
+    burst_end_long_lat   = burst_ends[['longitude',
+                                       'latitude']].to_numpy().astype(float)
+    burst_start_long_lat = burst_starts[['longitude',
+                                         'latitude']].to_numpy().astype(float)
+    nBursts = burst_number - 1   
+    for i in range(0,nBursts):
+        burst_start_line  = gridPoints[gridPoints['burst_number'] 
+                                 == str(i+1)]['line'].to_numpy().astype(int)[0]
+        burst_end_line    = gridPoints[gridPoints['burst_number'] 
+                                 == str(i+2)]['line'].to_numpy().astype(int)[0]
+        merged_start_line = burst_start_line
+        merged_end_line   = burst_end_line -1
+
+        burst_corners.append([(merged_start_line,0),
+                              (merged_end_line,0),
+                              (merged_end_line,nRangeSamples-1), 
+                              (merged_start_line,nRangeSamples-1)]
+                              )
+
+        burst_gps_corners.append([burst_start_long_lat[i,:], 
+                                  burst_start_long_lat[i+1,:], 
+                                  burst_end_long_lat[i+1,:], 
+                                  burst_end_long_lat[i,:]]
+                                  )
+
+    burst_info=[]
+    burst_info.append(burst_corners)
+    burst_info.append(burst_gps_corners)
+    
+    return burst_info
 
 #
 # Function to return boundaries of bursts prior to de-bursting
@@ -4219,14 +4896,14 @@ def getGoodShipCoords(ship_coords, burst_grid_gps_boundaries, burst_gps_boundari
 
 def create_roi(array, row_start, row_end, col_start, col_end):
     # Return the slice of the 2D array
-    return array[row_start:row_end, col_start:col_end]
+    return array[row_start:row_end, col_start:col_end].copy()
 
 def create_roi_from_polygon(array,boundary):
     row_start = boundary[0][0]
     row_end   = boundary[1][0]
     col_start = boundary[0][1]
     col_end   = boundary[3][1]
-    return array[row_start:row_end,col_start:col_end]
+    return array[row_start:row_end,col_start:col_end].copy()
 
 
 # function to accept 2 contiguous bursts and plot them
@@ -5578,7 +6255,10 @@ def find_raw_safe_dir(slc_safe_dir, raw_dir):
    time_format = '%Y%m%dT%H%M%S'
    #split and extract data and time 
    _dir, fname = os.path.split(slc_safe_dir)
-   date_time   = fname.split('_')[5]
+   if fname =='':
+       date_time   = _dir.split('_')[5]
+   else:
+       date_time   = fname.split('_')[5]
    slc_date_time = datetime.strptime(date_time, time_format)
    
    #find raw safe files that start less than 4s earlier than slc
@@ -5615,7 +6295,16 @@ def get_raw_file_in_safe_dir(safe_dir, pol):
         return raw_file 
 
     
+def get_raw_filename_matching_slc_filename_new(slc_safe_dir, raw_dir, pol):
+    # Modified 21 March 2026 to deal with directory structure that
+    # has RAW SAFE and SLC SAFE directories at same level 
+    # raw_safe_dir = find_raw_safe_dir(slc_safe_dir, raw_dir)
+    raw_safe_dir = raw_dir
+    raw_filename = get_raw_file_in_safe_dir(raw_safe_dir, pol)
+    return raw_filename
+   
 def get_raw_filename_matching_slc_filename(slc_safe_dir, raw_dir, pol):
+    
     raw_safe_dir = find_raw_safe_dir(slc_safe_dir, raw_dir)
     raw_filename = get_raw_file_in_safe_dir(raw_safe_dir, pol)
     return raw_filename
@@ -5632,7 +6321,8 @@ def get_raw_slc_annotation_filenames(raw_dir, slc_safe_dir, location, pol):
     slc_filenames   = slc_file_info[3]
 
     #raw_safe_dir = f'{raw_dir}'
-    raw_file = get_raw_filename_matching_slc_filename(slc_safe_dir, raw_dir, pol)
+    #raw_file = get_raw_filename_matching_slc_filename(slc_safe_dir, raw_dir, pol)
+    raw_file = get_raw_filename_matching_slc_filename_new(slc_safe_dir, raw_dir, pol)
     
     # Get gps boundaries of all swaths
     
@@ -5757,7 +6447,7 @@ def plot_raw_slc_data(fnames_and_swath, location, pol, info=[], save_fig=0, save
     
 
 
-    img_name =(f"{slc_src_file.split('/')[14].split('.')[0]}"
+    img_name =(f"{slc_src_file.split('/')[9].split('.')[0]}"
                f"_IW{swath_index+1}_Burst#{burst_index +1}")
   
 
@@ -5780,7 +6470,7 @@ def plot_raw_slc_data(fnames_and_swath, location, pol, info=[], save_fig=0, save
     #plot_2d_array(intensity(rc_padded_burst),'rc_padded_burst')
    
     #SLC_ID = slc_src_file.split('/')[11].split('.')[0]
-    safe_dir    = slc_src_file.split('/')[14]
+    safe_dir    = slc_src_file.split('/')[9]
     clean_name  = safe_dir.replace('.SAFE', '')
     # 3. Split by underscore and slice the last two items
     # [-2:] means "take the last two items"
