@@ -46,13 +46,14 @@ import geodatasets
 import reverse_geocoder as rg
 import pycountry
 import warnings
-from blob_module import *
+from modules.blob_module import *
 
 from scipy.spatial import distance
 from scipy.spatial.distance import pdist, squareform
 from matplotlib.lines import Line2D
 
-from SAR_focusing_module import *
+from modules.SAR_focusing_module import *
+from modules.chunk_processing_module import *
 
 
 
@@ -1968,6 +1969,24 @@ def plot_2d_Capella_array(array, title='Title', _type ='log_normal'):
     plt.show()
     return fig, ax
 
+def plot_2d_array_terminal(array, title='Title', _type ='log_normal', xlabel='X-axis', ylabel='Y-axis'):
+    fig, ax = plt.subplots()
+    if _type == 'log_normal':
+        im = ax.imshow(array,norm=colors.LogNorm(vmin=10,vmax = 1000000), aspect = 'auto')
+        #plt.colorbar(im)
+    elif _type == 'linear':
+       im = ax.imshow(array,vmin=array.min(), vmax=array.max(), aspect = 'auto')
+    elif _type == 'binary':
+       im = ax.imshow(array, cmap='Greys_r' ,aspect = 'auto')
+
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    # Inside plot_2d_array:
+    plt.show(block=False)
+    plt.pause(0.1)  # Brief pause to allow GUI backend to draw the frame
+    #plt.show()
+    return fig, ax
 
 
 def plot_2d_array(array, title='Title', _type ='log_normal', xlabel='X-axis', ylabel='Y-axis'):
@@ -2005,7 +2024,7 @@ def plot_2d_array_with_labelled_points(array, points, title='Title', _type ='log
         # s=200 sets the size of the circle marker
         # facecolors='none' keeps the inside hollow so you can see the array underneath
         # edgecolors sets the color of the circle boundary
-        ax.scatter(cols, rows, s=200, facecolors='none', edgecolors='red', linewidths=2, label='Points')
+        ax.scatter(cols, rows, s=50, facecolors='none', edgecolors='red', linewidths=2, label='Points')
         ax.legend()
     # ----------------------------------
     ax.set_title(title)
@@ -2894,6 +2913,33 @@ def get_SM_data(raw_file):
     
 
 
+###############################################################################
+## Function to return both meta data and radar data for a Stripmap file
+## Assumes only one signal echo (burst) or azimuth block with radar data
+## If > 1 use something else
+
+
+def get_SM_data_v2(raw_file):
+        
+    
+    raw_burst_info, l0file = get_SM_raw_burst_info_v2(raw_file)
+    meta_data  = []
+    radar_data = []
+    for i in range(len(raw_burst_info[0])):
+        # Finds first burst/block that is a signal echo
+        selected_burst = raw_burst_info[0].index[i]
+        meta_data[i]      = l0file.get_burst_metadata(selected_burst)
+        radar_data[i]     = l0file.get_burst_data(selected_burst)
+         
+    return meta_data, radar_data, l0file
+    
+
+
+
+
+
+###############################################################################
+##  July 9th 2026
 
 
 
@@ -2966,6 +3012,692 @@ def get_SM_raw_slc_offsets(raw_file, slc_annotation_file):
     return slc_az_start_offset_from_raw, slc_az_end_offset_from_raw, slc_range_start_offset, slc_range_end_offset
 
 
+###############################################################################
+## August 12th 2026
+## Amended to use v2.0 of sentinel1decoder to handle enumerated data types
+## Function to determine offset between start/end of raw file and slc in
+## both azimuth and range.
+## Based on timings in raw meta data and slc annotation file
+## Matches azimuth line start time (? mid-slant range?) in both raw and slc
+## Range matching currently assumed symmetrical - but may not be
+##
+
+## Need only change : raw_burst_info[0]['Num Azimuth Lines'].iloc[0] to
+##                    raw_burst_info[0]['Num Azimuth Lines'].sum()
+## as raw_burst_info is list with one element which is the dataframe
+## containing the start and end time for each chunk along with the number of 
+## azimuth lines and range samples (Number of Quads) in each chunk
+##
+## Sept 1st 2026
+## Amended to handle situations where more than 1 chunk/burst due
+## to change of paramters such as SWST or Number of Quads
+## Assumes that in each chunk the mid-point in range for both SLC and RAW 
+## data is the same.
+## Returns offsets in azimuth and range for each chunk/burst as array
+##
+def get_SM_raw_slc_offsets_v2(raw_file, slc_annotation_file):
+
+
+    chunk_info, l0file = get_SM_raw_burst_info_v2(raw_file)
+    slc_burst_info     = get_SM_GridPoints(slc_annotation_file)
+    tree               = etree.parse(slc_annotation_file)
+    root               = tree.getroot()
+    # SLC parameters
+    n_slc_az_lines      =   int(root.find('.//numberOfLines'      ).text)
+    n_slc_range_samples =   int(root.find('.//numberOfSamples'    ).text)
+    azTimeInterval      = float(root.find('.//azimuthTimeInterval').text)
+    az_pri              = float(root.find('.//pri'                ).text)
+    range_sampling_rate = float(root.find('.//rangeSamplingRate'  ).text)
+
+    # Raw parameters 
+    n_raw_az_lines      =  chunk_info[0]['Num Azimuth Lines'].tolist()
+    n_raw_range_samples = (chunk_info[0]['Number of Quads']*2).to_list()
+    # Check that Number of Quads is constant across all chunks
+    all_equal = chunk_info[0]['Number of Quads'].min() == chunk_info[0]['Number of Quads'].max()
+    if not all_equal:
+        print(f'Warning: Number of Quads in chunks not equal in {raw_file}')
+        #return -1
+
+
+
+    raw_start_time = chunk_info[0]['Burst Start Time']
+    slc_start_time = slc_burst_info.query("line == '0' and pixel == '0'"
+                                          )['azimuth_time']
+
+    delta = (slc_start_time.iloc[0] - raw_start_time.iloc[0]).total_seconds()
+    # Get slc offset from first line of raw data
+    slc_az_start_offset_from_raw = int(np.ceil(delta / az_pri))
+    slc_az_end_offset_from_raw   = int((np.sum(n_raw_az_lines)
+                                 - (slc_az_start_offset_from_raw + n_slc_az_lines))
+                                      )
+
+    # Check from range offset 
+    range_sample_diff = np.array(n_raw_range_samples) - n_slc_range_samples
+    slc_range_start_offset = np.round(range_sample_diff / 2).astype(int)
+#    slc_range_start_offset = int(np.round(range_sample_diff / 2 ))
+    slc_range_end_offset   = (n_raw_range_samples 
+                           -  (slc_range_start_offset+n_slc_range_samples))
+
+    chunk_offsets = []
+    for i in range(len(raw_start_time)):
+        if i == 0:
+            chunk_az_start_offset =  slc_az_start_offset_from_raw
+            chunk_az_end_offset   = n_raw_az_lines[i] 
+        elif i == len(raw_start_time) -1:
+            # Dealing with individual chunks so no offset except for first 
+            # chunk
+            chunk_az_start_offset = 0
+            chunk_az_end_offset   = n_raw_az_lines[i] - slc_az_end_offset_from_raw
+            # Check that not extending past raw azimuth boundary
+            # Can happen with SM S1 files - no idea why
+            #    - start time differentce too large between SLC and RAW
+            #    - such that:
+            #      slc_az_start_offset_from_raw + n_slc_az_lines > n_raw_az_lines
+            #
+            if chunk_az_end_offset > n_raw_az_lines[i]:
+                chunk_az_end_offset = n_raw_az_lines[i] 
+        else:
+            chunk_az_start_offset = 0
+            chunk_az_end_offset   = n_raw_az_lines[i] 
+
+        chunk_range_start_offset  = slc_range_start_offset[i]
+        chunk_range_end_offset    =  chunk_range_start_offset + n_slc_range_samples
+
+        offsets = [chunk_az_start_offset,
+                   chunk_az_end_offset,
+                   chunk_range_start_offset,
+                   chunk_range_end_offset
+                   ]
+        chunk_offsets.append(offsets)
+
+
+    return chunk_offsets
+#    return slc_az_start_offset_from_raw, slc_az_end_offset_from_raw, slc_range_start_offset, slc_range_end_offset
+
+
+###############################################################################
+def get_slc_parameters(slc_annotation_file):
+    tree               = etree.parse(slc_annotation_file)
+    root               = tree.getroot()
+    # SLC parameters
+    n_slc_az_lines      =   int(root.find('.//numberOfLines'      ).text)
+    n_slc_range_samples =   int(root.find('.//numberOfSamples'    ).text)
+    azTimeInterval      = float(root.find('.//azimuthTimeInterval').text)
+    az_pri              = float(root.find('.//pri'                ).text)
+    range_sampling_rate = float(root.find('.//rangeSamplingRate'  ).text)
+    return n_slc_az_lines, n_slc_range_samples, az_pri, range_sampling_rate
+
+
+###############################################################################
+## 2nd September 2026
+## Define dimensions of slc-matched-chunks
+## In general should be subset of RAW but for some S1
+## swaths seems that sum of azimuth offset and n_slc_az_lines is > n_raw_a_lines
+## This requires investigation
+def get_SM_slc_matched_chunk_dimensions(chunk_offsets):
+
+    slc_chunk_dims=[]
+    for i in range(len(chunk_offsets)):
+        if i == 0:
+           slc_az_start = 0
+           slc_az_end   = chunk_offsets[i][1] - chunk_offsets[i][0] -1
+        else:
+            # Add 1 to previous iteration end point for start of next slc chunk
+            slc_az_start = slc_az_end + 1
+            slc_az_end   = slc_az_start + chunk_offsets[i][1] - 1
+
+        slc_chunk_dims.append([slc_az_start, slc_az_end])
+    return slc_chunk_dims
+
+
+###############################################################################
+#
+# Function accepts output of process_chunks_for_offsets() and determines
+# indices of slc blocks in raw data
+# Inputs : block_offsets  -> output of process_chunks_for_offsets
+#                            offsets determined from ncc 
+#          raw_slc_offsets-> output of get_SM_raw_slc_offsets_v2() 
+#                            timing based offsets
+def get_SM_slc_block_offsets(block_offsets, raw_slc_offsets):
+    rows         = []
+    offsets      = block_offsets
+
+    for chunk_idx, chunk_data in enumerate(offsets, start=0):
+        # Extract existing offsets...
+        bottom_tuple        = chunk_data[0]
+        bottom_az_offset    = int(np.round(bottom_tuple[0]))
+        bottom_range_offset = int(np.round(bottom_tuple[1]))
+        top_tuple           = chunk_data[1]
+        top_az_offset       = int(np.round(top_tuple[0]))
+        top_range_offset    = int(np.round(top_tuple[1]))
+        parameters_tuple    = chunk_data[2]
+        SWST                = float(parameters_tuple[0])
+        SWL                 = float(parameters_tuple[1])
+        dt                  = float(parameters_tuple[2])
+        f                   = float(parameters_tuple[3])
+        raw_slc_az_offset   = int(parameters_tuple[4])
+        raw_slc_rng_offset  = int(parameters_tuple[5])
+        # azimuth NCC offset universal - only calculate for first block
+        if chunk_idx == 0: 
+            avg_ncc_az_offset   = int(np.round((bottom_az_offset
+                                            + top_az_offset) / 2)
+                                  )
+        avg_ncc_rng_offset  = int(np.round((bottom_range_offset
+                                            + top_range_offset) / 2)
+                                  )
+
+        # Calculate SLC dimensions for current chunk.
+        # Based on initial azimuith timings. If there is a ncc based 
+        # azimuth offset then number slc aziumth lines in each block changes
+        # But total number of azimuth lines must match number listed in 
+        # annotation file/slc file.
+        #
+        slc_az_lines = (
+            raw_slc_offsets[chunk_idx][1] - raw_slc_offsets[chunk_idx][0]
+        )
+        slc_range_samples = (
+            raw_slc_offsets[chunk_idx][3] - raw_slc_offsets[chunk_idx][2]
+        )
+
+        if chunk_idx == 0:
+           az_start = raw_slc_az_offset - avg_ncc_az_offset 
+           #az_end   = az_start + slc_az_lines - 1  # -1 as start at 0
+           az_end   = raw_slc_offsets[chunk_idx][1] -1 # -1 as start at 0
+        else:
+           az_start = az_end + 1
+           # Adjust end point if there is a ncc azimuth offset
+           az_end   = az_start + slc_az_lines - avg_ncc_az_offset - 1  # -1 as start at 0
+
+        rows.append({
+            "Chunk Number": chunk_idx,
+            "Bottom Az Offset": bottom_az_offset,
+            "Bottom Range Offset": bottom_range_offset,
+            "Top Az Offset": top_az_offset,
+            "Top Range Offset": top_range_offset,
+            "SWST": SWST,
+            "SWL": SWL,
+            "Pulsewidth": dt,
+            "Range Sampling Frequency": f,
+            "Azimuth Offset": raw_slc_az_offset,
+            "Range Offset": raw_slc_rng_offset,
+            "Avg NCC Az Offset": avg_ncc_az_offset,
+            "Avg NCC Range Offset": avg_ncc_rng_offset,
+            "N SLC Az Lines": slc_az_lines,
+            "N SLC Range Samples": slc_range_samples,
+            "Azimuth Start": az_start,
+            "Azimuth End": az_end
+        })
+
+    df = pd.DataFrame(rows)
+    df['Total Az Offset']    = df['Azimuth Offset'] - df['Avg NCC Az Offset']
+    df['Total Range Offset'] = df['Range Offset']   - df['Avg NCC Range Offset']
+    df['Range Start']        = df['Total Range Offset']
+    df['Range End']          = df['Range Start'] + df['N SLC Range Samples']
+
+    raw_slc_matched_indices = np.column_stack([
+                                               df['Azimuth Start'],
+                                               df['Azimuth End'],
+                                               df['Range Start'],
+                                               df['Range End']
+                                               ])
+
+    return raw_slc_matched_indices
+
+#
+# Function to accept raw, slc and annotation files for a particular scene
+# and returns the indices within each block for the start and end points of 
+# the SLC file.
+# One wrinkle: The indices currently assume a continuous raw azimuth data so
+# will be necessary to subtract azimuth end point+1 of previous block from 
+# current block to get slc matched location in second and subsequent blocks
+
+def get_SM_slc_matched_raw_block_indices(scene_files, slice_size=[5000,5000],
+                                         plot_plots=False
+                                        ):
+
+    # Get block raw data and metadata, and time-based-offsets
+    chunk_info  = process_file_for_chunks(scene_files)
+    timing_based_offsets = chunk_info[2]
+    slc_block_dims  = get_SM_slc_matched_chunk_dimensions(timing_based_offsets)
+    ncc_offsets = process_chunks_for_offsets(chunk_info, slice_size, plot_plots)
+    return get_SM_slc_block_offsets(ncc_offsets,timing_based_offsets), slc_block_dims
+
+
+
+import bisect
+
+
+def get_chunk_index(slc_chunk_dims, slc_az_line_number):
+    # Extract lower bounds (e.g., [0, 16216, 38668])
+    # Note: In a production pipeline, pre-calculate/store lower_bounds once
+    lower_bounds = [r[0] for r in slc_chunk_dims]
+    
+    # Find insertion position to the right of value
+    idx = bisect.bisect_right(lower_bounds, slc_az_line_number) - 1
+    
+    # Verify the value falls within the bounds of the identified range
+    if idx >= 0 and slc_chunk_dims[idx][0] <= slc_az_line_number <= slc_chunk_dims[idx][1]:
+        return idx
+    
+    return -1  # Value is outside all ranges
+###############################################################################
+# Given an AOI in cartesian [row,col] co-ordinates for a SLC file return the 
+# AOI in gps co-ordinates
+#
+# Inputs:  slc_aoi                - start and end co-ordinates in azimuth and 
+#                                   range [start_row,end_row, start_col, end_col]
+#          slc_annotation_file    - full path and filename of annotation file
+#
+# Outputs: slc_gps_aoi_lon_lat    - gps co-ordinates polygon [[SW],[NW],[NE],[SE]]
+#
+def get_SM_gps_aoi(slc_aoi, slc_annotation_file):
+
+    slc_grid_info          = get_SM_GridGPSBoundaries(slc_annotation_file)
+    slc_gps_boundary       = slc_grid_info[0]
+    slc_cartesian_grid     = slc_grid_info[1]
+    slc_gps_grid           = slc_grid_info[2]
+    slc_cartesian_subgrids = slc_grid_info[3]
+    slc_gps_subgrids       = slc_grid_info[4]
+
+    # Generate polygon from slc_aoi and find matching gps co-ordinates for 
+    # each vertex of polygon
+    slc_aoi_polygon=[[slc_aoi[0],slc_aoi[2]],
+                     [slc_aoi[1],slc_aoi[2]],
+                     [slc_aoi[1],slc_aoi[3]],
+                     [slc_aoi[0],slc_aoi[3]]
+                     ]
+    gps_aoi = [] 
+    for i in range(len(slc_aoi_polygon)):
+        cart_grid_idx      = getGrid(slc_aoi_polygon[i],slc_cartesian_grid)
+        cart_subgrid_idx   = getGrid(slc_aoi_polygon[i],slc_cartesian_subgrids[cart_grid_idx])
+        cart_subgrid_coords= np.array(slc_cartesian_subgrids[cart_grid_idx][cart_subgrid_idx])
+        gps_subgrid_coords = np.array(slc_gps_subgrids[cart_grid_idx][cart_subgrid_idx])
+        gps_coords         = extrapolate(slc_aoi_polygon[i], 
+                                         cart_subgrid_coords,
+                                         gps_subgrid_coords
+                                         )
+        gps_aoi.append(np.array(gps_coords))
+
+    return gps_aoi
+    
+    
+###############################################################################
+# Given an point in [row,col] co-ordinates for a SLC file return the 
+# point in gps co-ordinates
+#
+# Inputs:  slc_pt_row_col      - slc co-ordinates of point in [row,col] order
+#          slc_grid_info       - calibrations grids from annotation file
+#
+# Outputs: slc_gps_pt          -  gps co-ordinates of slc [row,col] point
+#
+
+def get_SM_gps_point(slc_pt_row_col, slc_grid_info):
+
+    slc_gps_boundary       = slc_grid_info[0]
+    slc_cartesian_grid     = slc_grid_info[1]
+    slc_gps_grid           = slc_grid_info[2]
+    slc_cartesian_subgrids = slc_grid_info[3]
+    slc_gps_subgrids       = slc_grid_info[4]
+
+    cart_grid_idx       = getGrid(slc_pt_row_col,slc_cartesian_grid)
+    cart_subgrid_idx    = getGrid(slc_pt_row_col_lat,slc_cartestian_subgrids[cart_grid_idx])
+    gps_subgrid_coords  = np.array(slc_gps_subgrids[cart_grid_idx][cart_subgrid_idx])
+    cart_subgrid_coords = np.array(slc_cartesian_subgrids[gps_grid_idx][gps_subgrid_idx])
+    gps_coords_float    = extrapolate(slc_pt_row_col,
+                                     cart_subgrid_coords,
+                                     gps_subgrid_coords
+                                     )
+    slc_gps_pt = gps_coords_float
+    return slc_gps_pt
+
+
+def get_SM_gps_point_using_annotation(slc_pt_row_col, slc_annotation_file):
+
+    slc_grid_info = get_SM_GridGPSBoundaries(slc_annotation_file)
+    return get_SM_cartesian_point(slc_pt_row_col, slc_grid_info)
+
+###############################################################################
+# Given an point in gps co-ordinates for a SLC file return the 
+# point in row/column co-ordinates
+#
+# Inputs:  slc_gps_pt_lon_lat  - gps co-ordinates of point in long lat order
+#          slc_grid_info       - SLC gps and Cartesian grid data 
+#
+# Outputs: slc_cart_pt         - location of point in row col co-ordinates 
+#
+
+def get_SM_cartesian_point(slc_gps_pt_lon_lat, slc_grid_info):
+
+    slc_gps_boundary       = slc_grid_info[0]
+    slc_cartesian_grid     = slc_grid_info[1]
+    slc_gps_grid           = slc_grid_info[2]
+    slc_cartesian_subgrids = slc_grid_info[3]
+    slc_gps_subgrids       = slc_grid_info[4]
+
+    gps_grid_idx       = getGrid(slc_gps_pt_lon_lat,slc_gps_grid)
+    gps_subgrid_idx    = getGrid(slc_gps_pt_lon_lat,slc_gps_subgrids[gps_grid_idx])
+    gps_subgrid_coords = np.array(slc_gps_subgrids[gps_grid_idx][gps_subgrid_idx])
+    cart_subgrid_coords= np.array(slc_cartesian_subgrids[gps_grid_idx][gps_subgrid_idx])
+    cart_coords_float  = extrapolate(slc_gps_pt_lon_lat,
+                                     gps_subgrid_coords,
+                                     cart_subgrid_coords
+                                     )
+    slc_cart_pt = cart_coords_float
+    return slc_cart_pt
+
+def get_SM_cartesian_point_using_annotation(slc_gps_pt_lon_lat, slc_annotation_file):
+
+    slc_grid_info   = get_SM_GridGPSBoundaries(slc_annotation_file)
+    return get_SM_cartesian_point(slc_gps_pt_lon_lat, slc_grid_info)
+
+###############################################################################
+# Given an AOI in gps co-ordinates for a SLC file return the 
+# AOI in row/column co-ordinates
+#
+# Inputs:  slc_gps_aoi_lon_lat    - gps co-ordinates of SW and NE corners of aoi
+#                                   in long lat order
+#          slc_annotation_file    - full path and filename of annotation file
+#
+# Outputs: slc_cart_aoi          - aoi of start and end row and columns in slc 
+#                                  in format:
+#                                  [start_row, end_row, start_col, end_col]
+#
+
+def get_SM_cartesian_aoi(slc_gps_aoi_lon_lat, slc_annotation_file):
+
+    slc_grid_info          = get_SM_GridGPSBoundaries(slc_annotation_file)
+    slc_gps_boundary       = slc_grid_info[0]
+    slc_cartesian_grid     = slc_grid_info[1]
+    slc_gps_grid           = slc_grid_info[2]
+    slc_cartesian_subgrids = slc_grid_info[3]
+    slc_gps_subgrids       = slc_grid_info[4]
+
+    # Get grids for AOI corners - Only need 2: SW and NE : indces 0 & 2
+    cart_aoi_sw_ne =[]
+    for i in [0,1]:
+        gps_grid_idx       = getGrid(slc_gps_aoi_lon_lat[i],slc_gps_grid)
+        gps_subgrid_idx    = getGrid(slc_gps_aoi_lon_lat[i],slc_gps_subgrids[gps_grid_idx])
+        gps_subgrid_coords = np.array(slc_gps_subgrids[gps_grid_idx][gps_subgrid_idx])
+        cart_subgrid_coords= np.array(slc_cartesian_subgrids[gps_grid_idx][gps_subgrid_idx])
+        cart_coords_float  = extrapolate(slc_gps_aoi_lon_lat[i],
+                                         gps_subgrid_coords,
+                                         cart_subgrid_coords
+                                         )
+        cart_aoi_sw_ne.append(np.round(np.array(cart_coords_float).astype(int)))
+    # With aoi_sw_ne generate slc_aoi
+    slc_cart_aoi = [cart_aoi_sw_ne[0][0], cart_aoi_sw_ne[1][0], 
+                    cart_aoi_sw_ne[0][1], cart_aoi_sw_ne[1][1]
+                    ]
+    return slc_cart_aoi
+
+###############################################################################
+#
+# Given a SLC AOI and slc filename extract the slc data
+#
+# Inputs:  slc_aoi        - [row_start, row_end, col_start, col_end]
+#          slc_filename   - 
+#          returns        - image data aoi
+from pathlib import Path
+
+def get_SM_slc_aoi(slc_aoi, slc_filename):
+    path = Path(slc_filename)
+
+    if not path.is_file():
+        raise FileNotFoundError(f"SLC file not found: {path}")
+
+    with rasterio.open(path) as src:
+        return src.read(
+            1,
+            window=(
+                (slc_aoi[0], slc_aoi[1]),
+                (slc_aoi[2], slc_aoi[3]),
+            ),
+        )
+
+
+###############################################################################
+#
+# Given a SLC AOI and associated raw-slc-offsets function
+# determines matching raw aoi. Depending on SLC AOI dispositon
+# the raw aoi may be entirely from one block or could be spread
+# over a number
+# 
+# Inputs: slc_aoi           - area of interst in SLC co-ordinates
+#                             [slc_start_row,  slc_end_row,
+#                             slc_start_range, slc_end_range]
+#         slc_block_indices - output of get_SM_slc_matched_raw_block_indices
+#         slc_block_dims    - output of get_SM_slc_matched_chunk_dimensions
+#
+# Output: raw_aoi           - nx4 array where n represents number of 
+#                           - blocks the raw data is distributed over
+#                             [0:n-1][raw_start_row:raw_end_row,
+#                                     raw_start_col:raw_emd_col]
+#
+def get_SM_slc_matched_raw_AOIs(slc_aoi, slc_block_indices,
+                                slc_block_dims):
+
+   slc_aoi_start_row = slc_aoi[0]
+   slc_aoi_end_row   = slc_aoi[1]
+   slc_aoi_start_col = slc_aoi[2]
+   slc_aoi_end_col   = slc_aoi[3]
+
+   start_block       = get_chunk_index(slc_block_dims, slc_aoi_start_row)
+   end_block         = get_chunk_index(slc_block_dims, slc_aoi_end_row)
+   n_spanned_blocks  = end_block - start_block + 1
+   slc_matched_raw_aoi = []
+   raw_slc_az_offset = slc_block_indices[0][0]
+   n_slc_aoi_rows    = slc_aoi_end_row - slc_aoi_start_row
+   n_slc_aoi_cols    = slc_aoi_end_col - slc_aoi_start_col
+   # SLC index at start of each block is the cumulative sum of the
+   # number of azimuth lines in each previous block minus the offset
+   # to the start of the first SLC azimuth line. Cumsum maintained in 
+   # slc_block_indices
+   block_slc_start_index = slc_block_indices[start_block][0] - raw_slc_az_offset
+
+   if n_spanned_blocks == 1:
+       if start_block == 0:
+           raw_start_row = slc_aoi_start_row + raw_slc_az_offset
+           raw_end_row   = slc_block_indices[start_block][0] + slc_aoi_end_row
+       else:
+           # For blocks subsequent to first the block indices give the 
+           # cumulative raw line numbers aligning with the start and end 
+           # of each block. The raw data starts at 0 and goes to the 
+           # difference between the start and end SLC line numbers
+           # 
+           #raw_start_row =  slc_aoi_start_row - slc_block_indices[start_block][0] + slc_block_indices[0][0]
+           raw_start_row =  slc_aoi_start_row - block_slc_start_index
+           raw_end_row   =  raw_start_row + n_slc_aoi_rows
+       
+       raw_start_col = slc_block_indices[start_block][2] + slc_aoi_start_col
+       raw_end_col   = raw_start_col + n_slc_aoi_cols
+       
+       slc_matched_raw_aoi.append([raw_start_row, raw_end_row, 
+                                   raw_start_col, raw_end_col]
+                                   )
+   elif n_spanned_blocks == 2:
+       if start_block == 0:
+           raw_start_row = slc_aoi_start_row + raw_slc_az_offset
+           # Fill to end of block              
+           raw_end_row   = slc_block_indices[start_block][1]
+       else:
+           #raw_start_row =  slc_aoi_start_row - slc_block_indices[start_block][0] + slc_block_indices[0][0]
+           raw_start_row =  slc_aoi_start_row - block_slc_start_index
+           # Fill to end of block              
+           raw_end_row   = slc_block_indices[start_block][1] 
+
+       raw_start_col = slc_block_indices[start_block][2] + slc_aoi_start_col
+       raw_end_col   = raw_start_col + n_slc_aoi_cols
+       
+       slc_matched_raw_aoi.append([raw_start_row, raw_end_row, 
+                                 raw_start_col, raw_end_col])
+
+       # SLC data spans 2 raw blocks so now process 2nd (end) block
+       raw_end_row   = slc_aoi_end_row - slc_block_indices[end_block][0] + raw_slc_az_offset
+       raw_start_row = 0    # 2nd block must start at 0
+       # 
+       raw_start_col = slc_block_indices[end_block][2] + slc_aoi_start_col
+       raw_end_col   = raw_start_col + n_slc_aoi_cols
+       
+       slc_matched_raw_aoi.append([raw_start_row, raw_end_row, 
+                                 raw_start_col, raw_end_col])
+
+
+   else:
+       # What if spans more then 2 blocks? Unlikley but possible.
+       # Need only get start and end block info for rows as internal 
+       # blocks are fixed 
+       # Note: Also need to know the starting block spanned
+       if start_block == 0:
+           raw_start_row = slc_aoi_start_row + raw_slc_az_offset
+           # Fill to end of block
+           raw_end_row   = slc_block_indices[start_block][1]
+       else:
+           raw_start_row =  slc_aoi_start_row - block_slc_start_index
+           #raw_start_row =  slc_aoi_start_row - slc_block_indices[start_block][0]
+           # Fill to end of block
+           raw_end_row   = slc_block_indices[start_block][1]
+
+       raw_start_col = slc_block_indices[start_block][2] + slc_aoi_start_col
+       raw_end_col   = raw_start_col + n_slc_aoi_cols
+
+       slc_matched_raw_aoi.append([raw_start_row, raw_end_row,
+                                 raw_start_col, raw_end_col])
+
+       # Get internal blocks
+       n_internal_blocks = n_spanned_blocks - 2
+       for i in range(n_internal_blocks):
+           internal_block_number = start_block + 1 + i
+           raw_start_row = 0
+           raw_end_row   = (slc_block_indices[internal_block_number][1]
+                          - slc_block_indices[internal_block_number][0]
+                           )
+           raw_start_col = slc_block_indices[internal_block_numner][2] + slc_aoi_start_col
+           raw_end_col   = raw_start_col + n_slc_aoi_cols
+
+           slc_matched_raw_aoi.append([raw_start_row, raw_end_row,
+                                       raw_start_col, raw_end_col])
+
+       # Process end block
+       raw_end_row   = slc_aoi_end_row - slc_block_indices[end_block][0] + raw_slc_az_offset
+       raw_start_row = 0    # End block must start at 0
+       # 
+       raw_start_col = slc_block_indices[end_block][2] + slc_aoi_start_col
+       raw_end_col   = raw_start_col + n_slc_aoi_cols
+       
+       slc_matched_raw_aoi.append([raw_start_row, raw_end_row, 
+                                 raw_start_col, raw_end_col])
+
+
+
+   return slc_matched_raw_aoi, start_block
+
+
+
+# Function to return raw aoi data from only slc_aoi and raw, slc and 
+# annotation files.
+#
+# Inputs:   
+#         slc_aoi     - aoi [row_start, row_end, col_start, col_end]
+#         files       - raw, slc, annotation
+#
+# Outputs:
+#        raw_aoi_data - complex raw data
+#
+def get_SM_raw_aoi_data(slc_aoi, files):
+
+    # Get block raw data and metadata, and time-based-offsets
+    chunk_info  = process_file_for_chunks(files)
+    timing_based_offsets = chunk_info[2]
+    slc_block_dims  = get_SM_slc_matched_chunk_dimensions(timing_based_offsets)
+    ncc_offsets = process_chunks_for_offsets(chunk_info, 
+                                             slice_size=[5000,5000], 
+                                             plot_plots=False)
+    slc_block_indices = get_SM_slc_block_offsets(ncc_offsets,
+                                                timing_based_offsets
+                                                )
+
+    # Depending on  the ncc_offsets there may be additional azimuth offset
+    # changes in which case revised slc_block_dims must be determined
+    slc_block_dims=[]
+    for block in range(len(slc_block_indices)):
+       if block ==0:
+           slc_block_dims.append([0,
+               slc_block_indices[0][1] - slc_block_indices[0][0] ]
+                 )
+       else:
+           slc_block_dims.append([slc_block_dims[block-1][1]+1,
+                      slc_block_indices[block][1]- slc_block_indices[0][0]
+                             ])
+
+    slc_matched_data = get_SM_slc_matched_raw_AOIs(slc_aoi,
+                                                   slc_block_indices,
+                                                   slc_block_dims
+                                                   )
+    slc_matched_raw_aoi = slc_matched_data[0]
+    start_block         = slc_matched_data[1]
+    # Get raw data  
+    chunk_raw_data = chunk_info[0]
+    raw_aoi_data_list=[]
+    for i in range(len(slc_matched_raw_aoi)):
+        raw_aoi_data_list.append(chunk_raw_data[i][
+                         slc_matched_raw_aoi[i][0]:slc_matched_raw_aoi[i][1],
+                         slc_matched_raw_aoi[i][2]:slc_matched_raw_aoi[i][3]
+                                                   ]
+                                  )
+    raw_aoi_data =np.concatenate( np.array(raw_aoi_data_list), axis=0)     
+    return raw_aoi_data
+
+
+
+
+
+#### or this:
+def get_SM_slc_matched_raw_AOIs_Geminid(slc_aoi, slc_block_indices, slc_block_dims):
+    """Maps SLC AOI bounds to relative row/col coordinates across raw data blocks."""
+    slc_aoi_start_row = slc_aoi[0]
+    slc_aoi_end_row = slc_aoi[1]
+    slc_aoi_start_col = slc_aoi[2]
+    slc_aoi_end_col = slc_aoi[3]
+
+    # Find starting and ending raw block indices
+    start_block = get_chunk_index(slc_block_dims, slc_aoi_start_row)
+    end_block = get_chunk_index(slc_block_dims, slc_aoi_end_row)
+
+    slc_matched_raw_aoi = []
+
+    for block_idx in range(start_block, end_block + 1):
+        blk_start_line = slc_block_indices[block_idx][0]
+        blk_end_line = slc_block_indices[block_idx][1]
+
+        # 1. Determine local raw start row for current block
+        if block_idx == start_block:
+            if block_idx == 0:
+                raw_start_row = blk_start_line + slc_aoi_start_row
+            else:
+                raw_start_row = slc_aoi_start_row - blk_start_line
+        else:
+            raw_start_row = 0  # Intermediate and end blocks start at line 0
+
+        # 2. Determine local raw end row for current block
+        if block_idx == end_block:
+            if block_idx == 0 and start_block == end_block:
+                raw_end_row = blk_start_line + slc_aoi_end_row
+            else:
+                raw_end_row = slc_aoi_end_row - blk_start_line
+        else:
+            raw_end_row = blk_end_line - blk_start_line  # Fill to end of block
+
+        # 3. Determine column offsets
+        raw_start_col = (
+            slc_block_indices[block_idx][2] + slc_aoi_start_col
+        )
+        raw_end_col = slc_block_indices[block_idx][3] + slc_aoi_end_col
+
+        slc_matched_raw_aoi.append(
+            [raw_start_row, raw_end_row, raw_start_col, raw_end_col]
+        )
+
+    return slc_matched_raw_aoi, start_block
 
 
 
@@ -3170,9 +3902,16 @@ def get_SM_raw_burst_info(raw_filename):
     raw_data = sentinel1decoder.Level0File(raw_filename)
                
     SM=[]
-    # Note: Labelling of SM swaths starts at 0  => S6 -> Swath Number of 5
-    swath_number = int(raw_filename.split('-')[1][1]) - 1
-    #swath_number = int(re.search(r's1a-s(\d+)-', raw_filename).group(1)) -1
+    # Note: Labelling of SM swaths starts at 0  => S1-S5 -> Swath Number of 0-4
+    #       But S5 is split in 2 for N and S hemispheres, S5N =4, S5S =5
+    #       S6 has swath number 6
+    
+    s_number = int(raw_filename.split('-')[1][1])
+    if s_number == 6:
+        swath_number = s_number
+    else:
+        swath_number = s_number - 1    
+    
     #filtered_df = raw_data.packet_metadata[raw_data.packet_metadata['Swath Number'] == swath_number]
     filtered_df = raw_data.packet_metadata[
         (raw_data.packet_metadata['Swath Number'] == swath_number) & 
@@ -3206,6 +3945,64 @@ def get_SM_raw_burst_info(raw_filename):
     result['Num Azimuth Lines']=number_of_azimuth_lines
     SM.append(result)
     return SM, raw_data
+
+
+##
+## Function to determine start and end time of SM raw 'burst' and report
+## number of lines and range-samples. Also returns all the decoded data
+## so can be used in other functions and reduces memory requirements by
+## preventing duplication
+##
+## Modifed to work with v2 where Az Block Number renamed Acquisition Chunk!!!!
+def get_SM_raw_burst_info_v2(raw_filename):
+    raw_data = sentinel1decoder.Level0File(raw_filename)
+
+    SM=[]
+    # Note: Labelling of SM swaths starts at 0  => S1-S5 -> Swath Number of 0-4
+    #       But S5 is split in 2 for N and S hemispheres, S5N =4, S5S =5
+    #       S6 has swath number 6
+
+    s_number = int(raw_filename.split('-')[1][1])
+    if s_number == 6:
+        swath_number = s_number
+    else:
+        swath_number = s_number - 1
+
+    #filtered_df = raw_data.packet_metadata[raw_data.packet_metadata['Swath Number'] == swath_number]
+    filtered_df = raw_data.packet_metadata[
+        (raw_data.packet_metadata['Swath Number'] == swath_number) &
+        (raw_data.packet_metadata['Signal Type'].apply(lambda x: x.name) == 'ECHO')
+    ]
+    result = filtered_df.groupby('Acquisition Chunk').agg(['first', 'last'])
+    result.reset_index()[['Acquisition Chunk', 'Coarse Time',
+                          'Fine Time', 'ECC Number','Signal Type',
+                          'Swath Number', 'Number of Quads']]
+    result = result.loc[:, [('Coarse Time', 'first'),('Fine Time', 'first'),
+                            ('Coarse Time', 'last'), ('Fine Time', 'last'),
+                            ('Signal Type', 'first'),
+                            ('Swath Number', 'first'), ('Number of Quads','first')]]
+    result.columns = ['Coarse Time First',  'Fine Time First','Coarse Time Last',
+                      'Fine Time Last','Signal Type', 'Swath Number', 'Number of Quads']
+    result['Burst Start Time'] = pd.to_datetime(result.apply(lambda row:
+                                  gps_to_utc(row['Coarse Time First'],
+                                          row['Fine Time First']), axis=1))
+    result['Burst End Time'] = pd.to_datetime(result.apply(lambda row:
+                                 gps_to_utc(row['Coarse Time Last'],
+                                           row['Fine Time Last']), axis=1))
+    result['Burst Duration'] = (result['Burst End Time']
+                             - result['Burst Start Time']).dt.total_seconds()
+    result['Mid Burst Time'] = result['Burst Start Time'] + pd.to_timedelta(result['Burst Duration']/2, unit='s')
+    # Get Number of Azimuth Lines in each burst
+    aa=filtered_df.groupby('Acquisition Chunk',as_index=False).head(1)
+    packet_numbers1 = aa.index.get_level_values('Packet Number')
+    aa=filtered_df.groupby('Acquisition Chunk',as_index=False).tail(1)
+    packet_numbers2 = aa.index.get_level_values('Packet Number')
+    number_of_azimuth_lines = packet_numbers2 - packet_numbers1 + 1
+    result['Num Azimuth Lines']=number_of_azimuth_lines
+    SM.append(result)
+    return SM, raw_data
+
+
 
 # Function to return time before and after mid-point of burst for which 
 # SLC data was used for de-merged bursts
@@ -4782,7 +5579,7 @@ def get_gps_of_point_in_burst(point, burst_number,annotation_file):
 
 def plotPointInBurst(point, burst_gps):
     fig2, ax2 = plt.subplots()
-    fig.set_facecolor('xkcd:salmon')
+    fig2.set_facecolor('xkcd:salmon')
     plt.style.context("dark_background")
     plt.style.use('dark_background')
     plt.tight_layout()
@@ -4812,8 +5609,6 @@ def getAllSwathBurstGPSBoundaries(SLC_file_names, path):
         swath_burst_gps.append(swath_info[2])
     return  swath_gps, swath_burst_gps
 
-def isPointInROI(point,ROI):
-    roi           = np.array(ROI,dtype=float)
 # Function to return GPS boundaries of all swaths
 def getAllSwathBoundaries(SLC_file_names, path):
     IW_gps=[]
@@ -4828,6 +5623,7 @@ def isPointInROI(point,ROI):
     area          = Polygon(roi)
     gps_point     = Point(point[0],point[1])
     isTrueOrFalse = shapely.contains(area,gps_point)
+    #isTrueOrFalse = shapely.intersects(area,gps_point)
     #isTrueOrFalse = shapely.contains(area,Point(point))
     return isTrueOrFalse
     
@@ -5590,6 +6386,56 @@ def generate_burst_binary_mask(image, burst_boundary,
 
     return img_rectangle_mask, binary_img_mask, ship_chip_mask, binary_ship_chip_mask
 
+###################################################################
+# Get  SM SLC files in format needed for subsequent functions.
+# It's not pretty!
+#
+def get_SM_slc_files_from_safe_dir(path, pol='hv'):
+    src_path        = f'{path}/measurement/'
+    if not os.path.isdir(src_path):
+        print(f'Error : {path}measurement directory not found')
+        return -1
+    slc_file        = glob.glob(f'{src_path}*{pol}*')[0]
+    annotation_path = f'{path}/annotation/'
+    annotation_file = glob.glob(f'{annotation_path}*{pol}*')[0]
+    return slc_file, annotation_file
+
+
+###################################################################
+# Get raw, slc and annotation file for a given SM SLC_ID on GCP
+#
+def get_SM_files_from_slc_id(slc_id_dir, pol):
+    if os.path.exists(slc_id_dir):
+        # Verify RAW directory exists
+        raw_dir =f'{slc_id_dir}RAW/'
+        slc_id = slc_id_dir.split('/')[-2]
+        slc_safe_dir =f'{slc_id_dir}SLC/{slc_id}.SAFE/'
+
+        if os.path.exists(raw_dir) and os.path.exists(slc_safe_dir): 
+            raw_safe_dir = find_SM_raw_safe_dir(slc_safe_dir, raw_dir)
+            raw_file     = get_raw_file_in_safe_dir(raw_safe_dir,pol)
+            if raw_file != -1:
+               slc_files = get_SM_slc_files_from_safe_dir(slc_safe_dir, pol)
+               # Check that 'measurement' directory exists
+               if slc_files == -1:
+                   return -1
+               slc_file  = slc_files[0]
+               slc_annotation_file = slc_files[1]
+            else:
+               print(f'Error: Raw file for {raw_safe_dir} and pol={pol} not found!')
+               return (-1)
+        else:
+            print(f'Error: Either raw dir {raw_dir}'
+                  f' or SLC Safe dir {slc_safe_dir} not found')
+            return (-1)
+    else:
+        print(f'Error: SLC_ID dir {slc_id_dir} not found')
+        return(-1)
+    return raw_file, slc_file, slc_annotation_file
+
+###################################################################
+# Get SLC files in format needed for subsequent functions. It's not
+# pretty!
 
 ###################################################################
 # Get SLC files in format needed for subsequent functions. It's not
@@ -5697,17 +6543,21 @@ def get_slc_related_filenames(path, swath_number, polarization):
 ##############################################################################
 # Get non-vessel co-ordinates & confidence for each burst in swath from label file
 #
+# Modified 22nd July 2026 to account for case where is_vessel is not assigned
+# a value. This happens if the Confidence is Low - unknwon why
+# In this case instead of checking if is_vessel is labelled False just check 
+# that it is not True
 #
 def getNonShipCoordinatesConfidence(label_fname, swath, SLC_ID):
     df1         = pd.read_csv(label_fname)
     ship_long   = df1[(df1['swath_index'] == swath)
-                 & (df1['is_vessel']==False)
+                 & (df1['is_vessel']!=True)
                  & (df1['SLC_product_identifier']== SLC_ID)]['detect_lon']
     ship_lat    = df1[(df1['swath_index'] == swath)
-                 & (df1['is_vessel']==False)
+                 & (df1['is_vessel']!=True)
                  & (df1['SLC_product_identifier']==SLC_ID)]['detect_lat']
     confidence  = df1[(df1['swath_index'] == swath)
-                 & (df1['is_vessel']==False)
+                 & (df1['is_vessel']!=True)
                  & (df1['SLC_product_identifier']==SLC_ID)]['confidence'].to_list()
     ship_coords = [ship_long, ship_lat]
     ship_coords = np.transpose(ship_coords)
@@ -5715,23 +6565,30 @@ def getNonShipCoordinatesConfidence(label_fname, swath, SLC_ID):
     return ship_coords, confidence
 
 
+
+
+
+
 ##############################################################################
 # Get ship co-ordinates & confidence for each burst in swath from label file
 #
-#
+# Modified 22nd July 2026 to account for case where is_vessel is not assigned
+# a value. This happens if the Confidence is Low - unknwon why
+# In this case instead of checking if is_vessel is labelled False just check 
+# that it is not True
 def getNonShipCoordinatesLengthConfidence(label_fname, swath, SLC_ID):
     df1         = pd.read_csv(label_fname)
     ship_long   = df1[(df1['swath_index'] == swath)
-                 & (df1['is_vessel']==False)
+                 & (df1['is_vessel']!=True)
                  & (df1['SLC_product_identifier']== SLC_ID)]['detect_lon']
     ship_lat    = df1[(df1['swath_index'] == swath)
-                 & (df1['is_vessel']==False)
+                 & (df1['is_vessel']!=True)
                  & (df1['SLC_product_identifier']==SLC_ID)]['detect_lat']
     confidence  = df1[(df1['swath_index'] == swath)
-                 & (df1['is_vessel']==False)
+                 & (df1['is_vessel']!=True)
                  & (df1['SLC_product_identifier']==SLC_ID)]['confidence'].to_list()
     length  = df1[(df1['swath_index'] == swath)
-                 & (df1['is_vessel']==False)
+                 & (df1['is_vessel']!=True)
                  & (df1['SLC_product_identifier']==SLC_ID)]['vessel_length_m'].to_list()
     ship_coords = [ship_long, ship_lat]
     ship_coords = np.transpose(ship_coords)
@@ -6249,7 +7106,38 @@ def get_slc_range_blackfill_indices(slc_burst, threshold_level=0.5):
 
 ############################################################################
 # Functions for plotting slc and raw files and location therein
-
+# For SM assume slc_safe_dir includes all path to dir
+#
+def find_SM_raw_safe_dir(slc_safe_dir, raw_dir):
+   #get start time of slc file
+   time_format = '%Y%m%dT%H%M%S'
+   #split and extract data and time 
+   _dir, fname = os.path.split(slc_safe_dir)
+   if fname =='':
+       date_time   = _dir.split('/')[-1].split('_')[5]
+   else:
+       date_time   = fname.split('_')[5]
+   slc_date_time = datetime.strptime(date_time, time_format)
+   
+   #find raw safe files that start less than 4s earlier than slc
+   #making assumption that only 1 raw file can exist within 5s of start of slc
+   # Ensure only parsing '.SAFE' files 
+   for f in os.listdir(raw_dir):
+       if 'SAFE' in f:
+           match_found = False
+           date_time = f.split('_')[5]
+           raw_date_time = datetime.strptime(date_time, time_format)
+           #Ensure SLC and RAW files within 5 seconds of each other
+           if (np.abs((slc_date_time - raw_date_time).total_seconds()) < 5):
+               match_found = True
+               break
+   if match_found == False:
+       print(f'Error: No raw SAFE dir found matching SLC start time for {slc_safe_dir}')
+       sys.exit(0)
+   else:
+       raw_safe_dir = f'{raw_dir}/{f}'
+       return raw_safe_dir 
+###############################################################################
 def find_raw_safe_dir(slc_safe_dir, raw_dir):
    #get start time of slc file
    time_format = '%Y%m%dT%H%M%S'
@@ -6289,7 +7177,8 @@ def get_raw_file_in_safe_dir(safe_dir, pol):
             break
 
     if file_found == False:
-        print(f'Error: No raw raw file matching criteria found in {safe_dir}')
+        print(f'Error: No raw file matching criteria found in {safe_dir}')
+        return -1
     else:
         raw_file = f'{safe_dir}/{f}'
         return raw_file 
@@ -6309,7 +7198,38 @@ def get_raw_filename_matching_slc_filename(slc_safe_dir, raw_dir, pol):
     raw_filename = get_raw_file_in_safe_dir(raw_safe_dir, pol)
     return raw_filename
    
+
+
+
+def get_SM_raw_slc_annotation_filenames(raw_dir, slc_safe_dir, pol):
+        
+    # Get slc image and annotation file names and directories
+    # Use getSLCFilesFromSafeDir function even though don't yet know which swath
+    # is of interest. Using '2' as a dummy placeholder.
+    slc_file_info   = getSLCFilesFromSafeDir(slc_safe_dir,2,pol)
+    annotation_path = slc_file_info[2]
+    slc_path        = annotation_path.replace('annotation','measurement')
+    slc_filenames   = slc_file_info[3]
+
+    #raw_safe_dir = f'{raw_dir}'
+    #raw_file = get_raw_filename_matching_slc_filename(slc_safe_dir, raw_dir, pol)
+    raw_file = get_raw_filename_matching_slc_filename_new(slc_safe_dir, raw_dir, pol)
     
+    # Get SLC src and annotation file names
+    slc_src_file    = slc_path + slc_filenames[swath_index]
+    annotation_file = annotation_path+change_extension(slc_filenames[swath_index],
+                                                        "xml"
+                                                       )
+  
+    return raw_file, slc_src_file, annotation_file 
+    
+
+
+
+
+
+
+
 def get_raw_slc_annotation_filenames(raw_dir, slc_safe_dir, location, pol):
         
     # Get slc image and annotation file names and directories
@@ -6596,10 +7516,22 @@ def place_roi(A: np.ndarray, roi_shape: tuple, p: tuple):
         starting_row (int): starting row index of ROI within A
         starting_col (int): starting column index of ROI within A
         new_centre        : location in crop of where desired point ends up
+        Aug 14 2026: A is a 2D array which may be either the image data 
+                     OR a 1x2 array that contains the shape of the image. 
+                     I acknowledge this is a kludge but it allows the same 
+                     function name to be used for different purposes, avoids
+                     having to re-write code that uses this function and also
+                     now allows for reduced memory usage use size of image and
+                     and not image data itself.
+
+
     """
 
     num_rows, num_cols = roi_shape  # note: roi_shape is (num_cols, num_rows) as per your problem
-    total_rows, total_cols = A.shape
+    if A.size == 2:
+        total_rows,total_cols = A.ravel()
+    else:
+        total_rows, total_cols = A.shape
 
     row_c, col_c = p  # The location p is (row, col)
 
@@ -7022,8 +7954,8 @@ def plot_I_Q_stats(raw_burst, slc_burst, ship_location, crc_burst, save_path):
 
     #Plot multiple graphs on single plot
     fig, axs  = plt.subplots(3, 6, figsize=(16,9),constrained_layout=True)
-    num_raw_bins  = 20
-    num_bins  = 100
+    num_raw_bins  = 101
+    num_bins  = 101
     threshold = 10
     # For example assign the function's plot to subplot 2
     plot_fig_name = f'{crc_burst}_ship_{ship_location}_RAW_SLC_Histograms'
@@ -7312,3 +8244,713 @@ def get_statistics(roi):
 def intensity(arr):
     return np.square(np.abs(arr))
 
+#
+# Function to determine whether satellite in an Ascending or Descending orbit
+#
+def get_orbital_node(annotation_file):
+    tree = etree.parse(annotation_file)
+    root = tree.getroot()
+    orbital_node = root.find('.//pass').text
+    if orbital_node == 'Ascending' or 'Descending':
+        return orbital_node
+    else:
+        print(f"Warning: No Orbital Node determined for {annotation_file.split('/SLC/')[0].split('_')[-1]} file")
+        return -1
+
+
+
+##############################################################################
+##
+##   Module for code to process chunks of Strip Map S1 data
+##
+##   Mainly to determine offset between Raw and SLC data in azimuth and range
+###############################################################################
+## Function to process number of files belonging to different swaths
+## Continues processing until requisite number of each are processed
+##
+## Had to move into SAR_code_module because of circular module definitions and
+## dependencies
+##
+
+#from .SAR_code_module import *
+#from .image_processing_module import *
+
+
+def process_files_for_chunk_offsets(slc_ids, root_path, swaths,
+                                    n_files_per_swath, pol, slice_size,
+                                    plot_plots
+                                    ):
+
+    #Initialize swath file counters dictionary
+    swath_file = {swath: 0 for swath in swaths}
+    total_files_required = n_files_per_swath * len(swaths)
+    swath_offsets = []
+
+    for slc_id in slc_ids:
+        for swath in swaths:
+            # Exclude 2016 as seems to be corruption issue with <line>0 in 
+            # some annotation files
+            if swath in slc_id and '_2016' not in slc_id:
+                if swath_file[swath] >= n_files_per_swath:
+                    continue
+
+
+                for pol in pols:
+                    
+                   files       = get_SM_files_from_slc_id(slc_id_path, pol)
+                   if files != -1:
+                       break  # Found files
+                                
+                if files == -1:
+                    print(f'Warning: {slc_id}:  Files not found ')
+                    continue
+                else:
+                    raw_slc_annot_files  = files
+                    
+                chunk_info = process_file_for_chunks(raw_slc_annot_files)
+
+                if chunk_info == -1:
+                    continue
+                else:
+                    offsets = process_chunks_for_offsets(chunk_info,
+                                                         slice_size,
+                                                         plot_plots
+                                                         )
+                    swath_file[swath]+=1
+                    swath_offsets.append([swath, slc_id, offsets])
+                    break # Move to the next slc_id once matched and processed
+
+        if sum(swath_file.values()) == total_files_required:
+            break
+
+
+    return swath_offsets
+
+
+##############################################################################
+## Function to process a SM acquisition and return the raw and metadata for
+## each chunk comprising teh acquisiton and the timing based offsets and the
+## of the individual files of for the acquisition
+##
+def process_file_for_chunks(raw_slc_annot_files):
+    
+   raw_file        = raw_slc_annot_files[0]
+   annotation_file = raw_slc_annot_files[2]   
+   parts =  raw_file.split('/')
+   for part in parts:
+       if '_SLC_' in part:
+           break
+   slc_id = part
+   parts  = slc_id.split('_')
+   slc_id_name =f'{parts[0]}_{parts[1]}_{parts[-1]}'
+
+   raw_burst_info, l0file = get_SM_raw_burst_info_v2(raw_file)
+   number_of_chunks       = len(raw_burst_info[0])
+
+   print(f'{slc_id} has {number_of_chunks} chunks : {raw_burst_info[0].index[:].to_list()}')
+
+   raw_slc_offsets = get_SM_raw_slc_offsets_v2(raw_file, annotation_file)
+
+   # Get chunk data and place in slice array
+   chunk_list     = raw_burst_info[0].index[:].to_list()
+   chunk_data     = []
+   chunk_metadata = []
+   raw_data       = []
+   number_failed_chunks = 0
+   for chunk in chunk_list:
+       try:
+           chunk_metadata.append(l0file.get_acquisition_chunk_metadata(chunk))
+           chunk_data.append(l0file.get_acquisition_chunk_data(chunk))
+
+           print(f'{slc_id} Chunk#{chunk} successfully read')
+       except:
+           print(f'{slc_id} Chunk#{chunk} failed!')
+           chunk_metadata.append([])
+           chunk_data.append([])
+           number_failed_chunks+=1
+           chunk_failed = True
+
+   if number_failed_chunks == 0:
+       for i in range(len(chunk_data)):
+           az_start    = int(raw_slc_offsets[i][0])
+           az_end      = int(raw_slc_offsets[i][1])
+           range_start = int(raw_slc_offsets[i][2])
+           range_end   = int(raw_slc_offsets[i][3])
+           #raw_data.append(chunk_data[i][az_start:az_end, range_start:range_end])
+   else:
+       print(f'Warning : {slc_id_name} has {number_failed_chunks} failed chunk(s):'
+             f' Ignoring and moving to next file'
+             )
+       return -1
+
+
+   return chunk_data, chunk_metadata, raw_slc_offsets, raw_slc_annot_files, l0file
+
+
+###############################################################################
+##
+## Input Args:
+##            chunk_info:
+##               chunk_data      - array of raw chunk data
+##               slc_image       - array of full slc data
+##               raw_slc_offsets - ofsets measured from start of raw chunk
+##               files           - raw, slc and annotation file names + paths
+##               l0file          - class for accessing raw and metadata
+##            slice_size      - size of NxM slice to use for cross correlation
+##
+## Returns:
+##            offsets          - array with top and bottom range and azimuth
+##                               offsets for each chunk
+##
+def process_chunks_for_offsets(chunk_info, slice_size, plot_plots):
+
+
+   chunk_data, meta_data, raw_slc_offsets, files, l0file = chunk_info
+   slc_file = files[1]
+   # Use context manager to properly manage rasterio handles
+   # Note slc_image is larger than individual raw chunks
+   with rasterio.open(slc_file) as slc_data:
+       slc_image = slc_data.read(1)
+
+   n_slc_az_lines      = slc_image.shape[0]
+   n_slc_range_samples = slc_image.shape[1]
+   n_raw_az_lines      = sum(chunk_data[i].shape[0] for i in range(len(chunk_data)))
+   offsets             = []
+   slc_chunk_offsets   = get_SM_slc_matched_chunk_dimensions(raw_slc_offsets)
+
+   for chunk in range(len(chunk_data)):
+       slc_data = slc_image[slc_chunk_offsets[chunk][0]:
+                            slc_chunk_offsets[chunk][1],:
+                            ]
+       # chunk_offsets[0] & [1] have bottom & top offsets
+       # chunk_offsets[0][0] is bottom az offset, [1][0] - top
+       chunk_offsets = get_chunk_top_bottom_offsetsII(chunk_data[chunk], 
+                                                          slc_data, 
+                                                          slice_size, 
+                                                          meta_data[chunk], 
+                                                          raw_slc_offsets[chunk],
+                                                          l0file,
+                                                          plot_plots
+                                                          )
+       # Only first chunk incurs azimuth offset error
+       # Other chunks should have zero azimuth offset error due to continuous
+       # raw and SLC azimuth lines
+       # Convert tuples to lists so elements can be modified
+       bot_off = list(chunk_offsets[0])
+       top_off = list(chunk_offsets[1])
+
+       if chunk == 0:
+           offsets.append([bot_off, top_off, chunk_offsets[2]])
+       else:
+           # Set bottom & top az offsets to zero
+           bot_off[0] = 0
+           top_off[0] = 0
+           offsets.append([bot_off, top_off, chunk_offsets[2]])
+
+   return offsets
+
+
+"""
+def process_files_for_chunk_offsets(slc_ids, root_path, swaths, n_files_per_swath, pol='VV'):
+    # Initialize file counter dictionary for each swath name
+    swath_file = {swath: 0 for swath in swaths}
+    total_required_files = n_files_per_swath * len(swaths)
+
+    for slc_id in slc_ids:
+        # Check if all swaths have met their file quotas
+        if sum(swath_file.values()) == total_required_files:
+            break
+
+        for swath in swaths:
+            if swath in slc_id:
+                # Skip if this swath quota is already satisfied
+                if swath_file[swath] >= n_files_per_swath:
+                    continue
+
+                # Process chunk offsets
+                chunk_info = process_file_for_chunks(slc_id, root_path, pol)
+
+                # Check for processing failure
+                if chunk_info == -1:
+                    continue
+                else:
+                    swath_file[swath] += 1
+                    break  # Move to the next slc_id once matched and processed
+
+    return swath_file
+
+
+"""
+
+###############################################################################
+## Function to determine offset at start and end of a single raw chunk
+## Used to verify that offset is constant within a chunk
+##
+## Input Args:
+##             chunk      - 2D array of complex whole chunk data
+##             slc_data   - 2D array of slc data matched to chunk size
+##             slice_size - size of NxM slice to use for cross correlation
+## Returns:
+##             bottom_offset - array with azimuth and range offset near start
+##             top_offset    - array with azimuth and range offset near end
+def get_chunk_top_bottom_offsets(chunk, slc_data, slice_size, meta_data,
+                                 chunk_raw_slc_offsets, l0file, plot_plots
+                                 ):
+
+   # Offset near start of chunk
+   #chunk_slice   =  chunk[0:slice_size[0], 0:slice_size[1]-1]
+   #chunk_offsets = [0, slice_size[1], 0, slice_size[0]] 
+   #focused_chunk = focus_SM_burst(meta_data, chunk_slice, chunk_offsets,
+   #                               l0file, 'rma'
+   #                                )
+   #focused_chunk_slice = intensity(focused_chunk)                                          
+
+   #slc_slice           = intensity(slc_data[0:slice_size[0], 0:slice_size[1]-1])
+   #bottom_offsets      = compute_image_offset(focused_chunk_slice,
+   #                                           slc_slice, plot_surface=True
+   #                                           )
+
+
+   # Ensure position compatible wih slice_size and slc chunk size
+   position_shift = [0,0]   # Start of chunk
+   position_shift = np.minimum(position_shift,
+                            np.array(slc_data.shape) - slice_size
+                            )
+   slice_az_start = chunk_raw_slc_offsets[0] + position_shift[0]
+   slice_az_end   = chunk_raw_slc_offsets[0] + position_shift[0] + slice_size[0]
+   slice_rng_start= chunk_raw_slc_offsets[2] + position_shift[1]
+   slice_rng_end  = chunk_raw_slc_offsets[2] + position_shift[1] + slice_size[1]
+
+   chunk_slice    =  chunk[slice_az_start:slice_az_end,
+                                    slice_rng_start:slice_rng_end
+                                   ]
+   # Note: chunk_offsets should be [rng_start, rng_end, az_start, az_end] unlike
+   # other offset variables which are [az_start, az_end, rng_start, rng_end]
+   chunk_offsets = [slice_rng_start, slice_size[0],
+                    slice_az_start, slice_size[1]
+                    ]
+   focused_chunk = focus_SM_burst(meta_data, chunk_slice, chunk_offsets,
+                               l0file, 'rma'
+                                )
+   focused_chunk_slice = intensity(focused_chunk)
+   # plot raw and slc slices using for NCC
+   slc_slice      = intensity(slc_data[position_shift[0]:
+                                       slice_size[0] + position_shift[0] - 1,
+                                       position_shift[1]:
+                                       slice_size[1] + position_shift[1] - 1
+                                       ]
+                                        )
+   bottom_offsets = compute_image_offset(focused_chunk_slice,
+                                         slc_slice, plot_plots
+                                         )
+   if plot_plots:
+      plot_2d_array(focused_chunk_slice,title='Bottom RDA Focused Slice')
+      plot_2d_array(slc_slice,title='Bottom SLC Slice')
+
+   # Offset near end of chunk
+   # raw_slc_offsets[chunk][1] is the final azimuth line of the chunk
+   # position_shift =[raw_slc_offsets[chunk][1] - 2*slice_size[0], 0]
+   # Check end of range
+   position_shift = [chunk_raw_slc_offsets[1] - 2*slice_size[0],
+                     chunk_raw_slc_offsets[3] -   slice_size[1] - 1
+                     ]
+   # Ensure position compatible wih slice_size and slc chunk size
+   position_shift = np.minimum(position_shift,
+                               np.array(slc_data.shape) - slice_size
+                               )
+   slice_az_start = chunk_raw_slc_offsets[0] + position_shift[0]
+   slice_az_end   = chunk_raw_slc_offsets[0] + position_shift[0] + slice_size[0]
+   slice_rng_start= chunk_raw_slc_offsets[2] + position_shift[1]
+   slice_rng_end  = chunk_raw_slc_offsets[2] + position_shift[1] + slice_size[1]
+
+   chunk_slice    =  chunk[slice_az_start:slice_az_end,
+                           slice_rng_start:slice_rng_end
+                           ]
+   #chunk_offsets = [0, slice_size[1], 0, slice_size[0]]
+   chunk_offsets = [slice_rng_start, slice_size[0],
+                    slice_az_start,  slice_size[1]
+                    ]
+
+   focused_chunk = focus_SM_burst(meta_data, chunk_slice, chunk_offsets,
+                               l0file, 'rma'
+                                )
+
+   # Detect slc and focused raw data
+   focused_chunk_slice = intensity(focused_chunk)
+
+   slc_az_start_idx  = slice_az_start  - chunk_raw_slc_offsets[0]
+   slc_az_end_idx    = slice_az_end    - chunk_raw_slc_offsets[0]
+   slc_rng_start_idx = slice_rng_start - chunk_raw_slc_offsets[2]
+   slc_rng_end_idx   = slice_rng_end   - chunk_raw_slc_offsets[2]
+   slc_slice         = intensity(slc_data[slc_az_start_idx : slc_az_end_idx,
+                                      slc_rng_start_idx: slc_rng_end_idx
+                                      ])
+   if plot_plots:
+      plot_2d_array(focused_chunk_slice,title='Top RDA Focused Slice')
+      plot_2d_array(slc_slice,title='Top SLC Slice')
+
+   top_offsets   = compute_image_offset(focused_chunk_slice,
+                                     slc_slice, plot_plots
+                                     )
+   return bottom_offsets, top_offsets
+
+###############################################################################
+#
+# Function to find offset between SLC and RAW using NCC at specific point
+# Can then be used twice in get_chunk_top_bottom_offsets
+def get_chunk_offset_at_position(position, chunk, slc_data, slice_size, meta_data,
+                                 chunk_raw_slc_offsets, l0file, plot_plots
+                                 ):
+
+   # Ensure position compatible wih slice_size and slc chunk size
+   position       = np.minimum(position, np.array(slc_data.shape) - slice_size)
+   slice_az_start = chunk_raw_slc_offsets[0] + position[0]
+   slice_az_end   = chunk_raw_slc_offsets[0] + position[0] + slice_size[0]
+   slice_rng_start= chunk_raw_slc_offsets[2] + position[1]
+   slice_rng_end  = chunk_raw_slc_offsets[2] + position[1] + slice_size[1]
+
+   chunk_slice    =  chunk[slice_az_start:slice_az_end,
+                           slice_rng_start:slice_rng_end
+                           ]
+   # Note: chunk_offsets should be [rng_start, rng_end, az_start, az_end] unlike
+   # other offset variables which are [az_start, az_end, rng_start, rng_end]
+   chunk_offsets = [slice_rng_start, slice_size[0],
+                    slice_az_start,  slice_size[1]
+                    ]
+   focused_chunk = focus_SM_burst(meta_data, chunk_slice, chunk_offsets,
+                                  l0file, 'rma'
+                                  )
+   # Detect slc and focused raw data
+   focused_chunk_slice = intensity(focused_chunk)
+   
+   #slc_az_start_idx  = slice_az_start  - chunk_raw_slc_offsets[0]
+   #slc_az_end_idx    = slice_az_end    - chunk_raw_slc_offsets[0]
+   #slc_rng_start_idx = slice_rng_start - chunk_raw_slc_offsets[2]
+   #slc_rng_end_idx   = slice_rng_end   - chunk_raw_slc_offsets[2]
+   #slc_slice         = intensity(slc_data[slc_az_start_idx : slc_az_end_idx,
+   #                                       slc_rng_start_idx: slc_rng_end_idx
+   #                                       ])
+   # Can replace 5 lines above with single line:
+   slc_slice          = intensity(slc_data[position[0]:position[0] + slice_size[0],
+                                           position[1]:position[1] + slice_size[1]
+                                           ])
+   if plot_plots :
+      plot_2d_array(focused_chunk_slice,title='Top RDA Focused Slice')
+      plot_2d_array(slc_slice,title='Top SLC Slice')
+
+   offsets   = compute_image_offset(focused_chunk_slice,
+                                     slc_slice, plot_plots
+                                     )
+   return offsets
+
+
+
+###############################################################################
+def get_chunk_top_bottom_offsetsII(chunk, slc_data, slice_size, meta_data,
+                                   chunk_raw_slc_offsets, l0file, plot_plots
+                                   ):
+   bottom_position = [0,0]
+   bottom_offsets  = get_chunk_offset_at_position(bottom_position, chunk,
+                                                slc_data, slice_size, meta_data,
+                                                chunk_raw_slc_offsets, l0file,
+                                                plot_plots
+                                                )
+   top_position = [chunk_raw_slc_offsets[1] - 2*slice_size[0],
+                   chunk_raw_slc_offsets[3] -   slice_size[1] - 1
+                   ]
+   top_offsets  = get_chunk_offset_at_position(top_position, chunk, slc_data, 
+                                                slice_size, meta_data,
+                                                chunk_raw_slc_offsets, l0file,
+                                                plot_plots
+                                                )
+   
+
+   # Get SWST, f & TXPL for each chunk
+   SWST                 = meta_data['SWST'].unique()[0]
+   SWL                  = meta_data['SWL'].unique()[0]
+   pulse_length         = meta_data['Tx Pulse Length'].unique()[0]
+   RGDEC                = meta_data["Range Decimation"].unique()[0]
+   range_sample_freq    = sentinel1decoder.utilities.range_dec_to_sample_rate(RGDEC)
+   #chirp_filter_length = int(np.round(pulse_length * range_sample_freq))
+   
+   parameters =[SWST, SWL, pulse_length, range_sample_freq, 
+                chunk_raw_slc_offsets[0], chunk_raw_slc_offsets[2]
+                ]
+
+
+   return bottom_offsets, top_offsets, parameters
+
+
+
+
+
+##############################################################################
+##
+def print_chunk_slc_offsets(offsets):
+   # Header string formatted with fixed column widths
+   print(f"{'Chunk':<12} | {'Bottom (Az, Range)':<22} | {'Top (Az, Range)':<22}")
+   print("-" * 62)
+
+   for i in range(len(offsets)):
+       # Format each inner list/tuple into a uniform width string
+       bot_str = f"[{offsets[i][0][0]}, {offsets[i][0][1]}]"
+       top_str = f"[{offsets[i][1][0]}, {offsets[i][1][1]}]"
+
+       print(f"Chunk#{i:<5} | {bot_str:<22} | {top_str:<22}")
+
+
+
+
+
+
+def get_slc_matched_chunk_data(chunk_data, raw_slc_offsets):
+
+    for i in range(len(chunk_data)):
+        az_start    = int(raw_slc_offsets[i][0])
+        az_end      = int(raw_slc_offsets[i][1])
+        range_start = int(raw_slc_offsets[i][2])
+        range_end   = int(raw_slc_offsets[i][3])
+        raw_data.append(chunk_data[i][az_start:az_end, range_start:range_end])
+
+    return raw_data
+
+
+
+
+# Function to accept an AOI in an SLC file in [row,col]
+# co-ordinates and focus the equivalent raw data and plot
+# the original raw and slc data and the focused raw data
+# and returns the focused raw data
+#
+# Inputs : slc_aoi  -- [row_start,row_end,col_start,col_end]
+#          files    -- list of raw, slc and annotation file
+#
+# Outputs: rda_aoi  -- RDA focused aoi data
+#
+def focus_RDA_SM_aoi(slc_aoi, files, pad_with ='Zeroes',
+                     plot_plots=False,
+                     azimuth_padding=1024, range_padding=1024
+                     ):
+    # Get offsets between SLC and raw data
+    chunk_info  = process_file_for_chunks(files)
+    timing_based_offsets = chunk_info[2]
+    slc_block_dims  = get_SM_slc_matched_chunk_dimensions(timing_based_offsets)
+    ncc_offsets     = process_chunks_for_offsets(chunk_info, slice_size=[5000,5000], plot_plots=False)
+    slc_block_indices = get_SM_slc_block_offsets(ncc_offsets,
+                                            timing_based_offsets
+                                            )
+
+    # Need to fix this for cases where >2 blocks
+    slc_block_dims=[]
+    for block in range(len(slc_block_indices)):
+        if block ==0:
+            slc_block_dims.append([0, slc_block_indices[0][1] - slc_block_indices[0][0] ])
+        else:
+            slc_block_dims.append([slc_block_dims[block-1][1]+1,
+                        slc_block_indices[block][1]- slc_block_indices[0][0]
+                                 ])
+
+
+    #slc_block_dims = [[0, slc_block_indices[0][1] - slc_block_indices[0][0]],
+    #              [slc_block_indices[0][1] - slc_block_indices[0][0] + 1,
+    #               slc_block_indices[1][1] - slc_block_indices[0][0]]
+    #             ]
+
+    slc_aoi_start_row = slc_aoi[0]
+    slc_aoi_end_row   = slc_aoi[1]
+    slc_aoi_start_col = slc_aoi[2]
+    slc_aoi_end_col   = slc_aoi[3]
+
+    # Currently only dealing with cases where slc_aoi is within one block
+    # If spans more than one block then tell user to get ... chose a different
+    # aoi as otherwise have to focus 2 separate raw aois
+    aoi_block = -1
+    for block in range(len(slc_block_dims)):
+        b_start, b_end = slc_block_dims[block]
+        if b_start <=slc_aoi_start_row < slc_aoi_end_row <= b_end:
+            aoi_block = block
+            break
+
+    if aoi_block == -1:
+        print(f' SLC AOI spans 2 raw blocks - not currently supported.')
+        print(f' Choose AOI with rows within {slc_block_dims}')
+        return -1
+
+
+    # Get AOI in raw that matches with SLC
+    raw_aoi, sb = get_SM_slc_matched_raw_AOIs(slc_aoi,
+                                              slc_block_indices,
+                                              slc_block_dims
+                                              )
+
+    # Get data for whole block - probably not very efficient!
+    block_raw_data      = chunk_info[0]
+    n_raw_az_lines      = block_raw_data[aoi_block].shape[0]
+    n_raw_range_samples = block_raw_data[aoi_block].shape[1]
+    raw_aoi        = np.squeeze(raw_aoi)
+    raw_aoi_data   = block_raw_data[aoi_block][raw_aoi[0]:raw_aoi[1],
+                                               raw_aoi[2]:raw_aoi[3]
+                                               ]
+    # Get meta and ephemerides data for block
+    # Needed for full focusing
+    block_metadata = chunk_info[1][block]
+    l0file_block   = chunk_info[4]
+
+    # Get SLC data
+    slc_block_aoi_data    = get_SM_slc_aoi(slc_aoi,files[1])
+    range_start_padding   = range_end_padding  = range_padding
+    azimuth_start_padding = azimuth_end_padding = azimuth_padding
+    # Add padding to raw data. Given the slc_aoi position does the
+    # padding fit? If not choose smallest value that fits and use at both
+    # ends
+    if azimuth_padding > raw_aoi[0]:
+        azimuth_start_padding = raw_aoi[0]
+    if azimuth_padding > n_raw_az_lines -raw_aoi[1]:
+        azimuth_end_padding = n_raw_az_lines -raw_aoi[1]
+
+    if range_padding > raw_aoi[2]:
+        range_start_padding = raw_aoi[2]
+    if range_padding > n_raw_range_samples - raw_aoi[3]:
+        range_end_padding = n_raw_range_samples - raw_aoi[3]
+
+    rng_padding = np.minimum(range_end_padding,range_start_padding)
+    az_padding  = np.minimum(azimuth_end_padding, azimuth_start_padding)
+
+    az_start_row  = raw_aoi[0] - az_padding
+    az_end_row    = raw_aoi[1] + az_padding
+    rng_start_col = raw_aoi[2] - rng_padding
+    rng_end_col   = raw_aoi[3] + rng_padding
+
+    if pad_with == 'Zeroes':
+        raw_roi_padded_data = np.pad(raw_aoi_data,
+                                     ((az_padding, az_padding),
+                                      (rng_padding, rng_padding)),
+                                     mode="constant", constant_values=0
+                                      )
+    else:
+        # Pad with actual data
+        raw_roi_padded_data = block_raw_data[aoi_block][az_start_row :az_end_row,
+                                                        rng_start_col:rng_end_col
+                                                       ]
+    # Note raw_roi is  [range_start, range_length, az_start, az_length]
+    raw_roi       = [rng_start_col, (rng_end_col - rng_start_col),
+                     az_start_row, (az_end_row - az_start_row)
+                     ]
+    rda_padded_data = focus_SM_burst(block_metadata,
+                                    raw_roi_padded_data,
+                                    raw_roi,
+                                    l0file_block,
+                                   'rma'
+                                    )
+
+    rda_data = rda_padded_data[az_padding : -az_padding,
+                               rng_padding: -rng_padding]
+
+    print(f' Completed focusig ...... plotting ...')
+
+    if plot_plots:
+        slc_file = files[1]
+        parts=slc_file.split('/')[6].split('_')
+        plot_title=f'{parts[0]}_{parts[1]}_{parts[9]}'
+        plot_2d_array_terminal(intensity(rda_data),
+                  title=f'RDA Focused Raw {slc_aoi} : {plot_title}')
+
+        print(f'******** Completed focusing and plotted RDA ***************')
+
+        plot_2d_array_terminal(intensity(slc_block_aoi_data),
+                      f'SLC Data AOI {slc_aoi} : {plot_title}')
+        plot_2d_array_terminal(np.real(raw_aoi_data),
+                      f'Raw AOI {slc_aoi} : {plot_title}')
+
+        print(f' Function finished .....')
+        plt.show(block=False)
+
+
+    return rda_data
+
+
+
+###############################################################################
+# 28th October 2026
+# Function to return block of raw data that matches the slc_aoi
+# Inputs: 
+#         slc_aoi     - AOI in slc for which equivalent raw data is sought
+#                     - slc_aoi = [start_row,end_row, start_col, end_col]
+#         files       - list of raw, slc and annotation files 
+# Outputs:
+#         raw_aoi_data - 2D array of complex raw data matched to slc_aoi
+#
+def get_raw_aoi_data(slc_aoi, files):
+
+    # Get offsets between SLC and raw data
+    chunk_info  = process_file_for_chunks(files)
+    timing_based_offsets = chunk_info[2]
+    slc_block_dims  = get_SM_slc_matched_chunk_dimensions(timing_based_offsets)
+    ncc_offsets     = process_chunks_for_offsets(chunk_info, 
+                            slice_size=[5000,5000], plot_plots=False
+                                                )
+    slc_block_indices = get_SM_slc_block_offsets(ncc_offsets,
+                                            timing_based_offsets
+                                            )
+
+    # Depending on  the ncc_offsets there may be additional azimuth offset
+    # changes in which case revised slc_block_dims must be determined
+    slc_block_dims=[]
+    for block in range(len(slc_block_indices)):
+        if block ==0:
+            slc_block_dims.append([0, 
+                slc_block_indices[0][1] - slc_block_indices[0][0] ]
+                )
+        else:
+            slc_block_dims.append([slc_block_dims[block-1][1]+1,
+                        slc_block_indices[block][1]- slc_block_indices[0][0]
+                                 ])
+    slc_aoi_start_row = slc_aoi[0]
+    slc_aoi_end_row   = slc_aoi[1]
+    slc_aoi_start_col = slc_aoi[2]
+    slc_aoi_end_col   = slc_aoi[3]
+
+    # Currently only dealing with cases where slc_aoi is within one block
+    # If spans more than one block then tell user to get ... chose a different
+    # aoi as otherwise have to focus 2 separate raw aois
+    aoi_block = -1
+    for block in range(len(slc_block_dims)):
+        b_start, b_end = slc_block_dims[block]
+        if b_start <=slc_aoi_start_row < slc_aoi_end_row <= b_end:
+            aoi_block = block
+            break
+
+    if aoi_block == -1:
+        print(f' SLC AOI spans 2 raw blocks - not currently supported.')
+        print(f' Choose AOI with rows within {slc_block_dims}')
+        return -1
+
+
+    # Get AOI in raw that matches with SLC
+    raw_aoi, sb = get_SM_slc_matched_raw_AOIs(slc_aoi,
+                                              slc_block_indices,
+                                              slc_block_dims
+                                              )
+
+    # Get data for whole block - probably not very efficient!
+    block_raw_data = chunk_info[0]
+    raw_aoi        = np.squeeze(raw_aoi)
+    raw_aoi_data   = block_raw_data[aoi_block][raw_aoi[0]:raw_aoi[1],
+                                               raw_aoi[2]:raw_aoi[3]
+                                               ]
+
+    return raw_aoi_data
+
+
+
+###############################################################################
+# Function to return shorter version of slc_id
+def shorten_slc_id(slc_id):
+    parts=slc_id.split('_')
+    return f'{parts[0]}_{parts[1]}_{parts[5]}_{parts[-1]}'
+
+def get_pol_from_annot_filepath(annot_filepath):
+    filename = os.path.basename(annot_filepath)
+    # Option A: Split by position (always index 3 in Sentinel-1 SAFE annotation XMLs)
+    pol = filename.split("-")[3]
+    return pol
